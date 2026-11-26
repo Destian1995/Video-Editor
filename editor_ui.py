@@ -175,6 +175,40 @@ class RecordingStatus(QTextEdit):
         self.setFixedHeight(ceil(size.height()))
 
 
+class WebcamBorderPreview(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setAccessibleName("Предпросмотр рамки веб-камеры")
+        self.setFixedSize(148, 100)
+        self.layers = []
+
+    def set_layers(self, layers):
+        self.layers = layers
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(QPen(QColor("#514467"), 1))
+        painter.setBrush(QColor("#14121e"))
+        painter.drawRoundedRect(QRectF(self.rect()).adjusted(1, 1, -1, -1), 10, 10)
+
+        image = QRectF(20, 20, 108, 60)
+        border = sum(width for width, _ in self.layers)
+        bounds = image.adjusted(-border, -border, border, border)
+        for width, color in reversed(self.layers):
+            painter.fillRect(bounds, QColor(color))
+            bounds.adjust(width, width, -width, -width)
+        gradient = QLinearGradient(image.topLeft(), image.bottomRight())
+        gradient.setColorAt(0, QColor("#403452"))
+        gradient.setColorAt(1, QColor("#252238"))
+        painter.fillRect(image, gradient)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor("#8875a6"))
+        painter.drawEllipse(QPointF(74, 44), 9, 9)
+        painter.drawRoundedRect(QRectF(57, 55, 34, 17), 8, 8)
+
+
 class FramePreview(QLabel):
     empty_text = "Откройте видео для предпросмотра"
 

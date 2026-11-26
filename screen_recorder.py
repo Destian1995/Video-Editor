@@ -17,7 +17,9 @@ from logger import logger
 from recording_audio import AudioCapture, SOURCES, mux_audio_args
 from recording_segments import JoinSegments
 from recording_settings import RecordingSettings, default_recording_directory
-from webcam_capture import DEFAULT_WEBCAM_POSITION, webcam_overlay
+from webcam_capture import (
+    DEFAULT_WEBCAM_BORDER_COLOR, DEFAULT_WEBCAM_BORDER_STYLE, DEFAULT_WEBCAM_POSITION, webcam_overlay,
+)
 
 
 TARGET_FPS = 60
@@ -99,13 +101,16 @@ class RecordingHotkey:
         return False
 
 
-def recording_args(path, audio=False, camera="", position=DEFAULT_WEBCAM_POSITION):
+def recording_args(
+    path, audio=False, camera="", position=DEFAULT_WEBCAM_POSITION,
+    border_style=DEFAULT_WEBCAM_BORDER_STYLE, border_color=DEFAULT_WEBCAM_BORDER_COLOR,
+):
     capture = (
         f"ddagrab=output_idx=0:framerate={TARGET_FPS}:draw_mouse=0,"
         "hwdownload,format=bgra,pad=ceil(iw/2)*2:ceil(ih/2)*2"
     )
     if camera:
-        capture = webcam_overlay(capture, position)
+        capture = webcam_overlay(capture, position, border_style, border_color)
     graph = f"{capture}[screen]"
     if audio:
         # Timestamp only the first frame. The clock branch must reach EOF so
@@ -277,6 +282,8 @@ class ScreenRecorder(QObject):
         if self.webcam_in_use:
             options["camera"] = self.settings.webcam_device
             options["position"] = self.settings.webcam_position
+            options["border_style"] = self.settings.webcam_border_style
+            options["border_color"] = self.settings.webcam_border_color
             self.webcam_timeout.start(12000)
         self.process.start("ffmpeg", recording_args(self.partial_path, **options))
 

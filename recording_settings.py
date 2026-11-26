@@ -5,16 +5,22 @@ from pathlib import Path
 from subprocess import TimeoutExpired
 
 from PyQt5.QtCore import QSettings, QStandardPaths, Qt
+from PyQt5.QtGui import QColor, QIcon, QPixmap
 from PyQt5.QtWidgets import (
-    QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFrame,
+    QButtonGroup, QCheckBox, QColorDialog, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFrame,
     QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QProgressBar,
     QPushButton, QSlider, QTabWidget, QVBoxLayout, QWidget,
 )
 
+from editor_ui import WebcamBorderPreview
 from recording_audio import (
     MicrophoneTest, SOURCES, device_name, list_audio_devices, microphone_meter_level,
 )
-from webcam_capture import DEFAULT_WEBCAM_POSITION, WEBCAM_POSITIONS, webcam_devices, webcam_position
+from webcam_capture import (
+    DEFAULT_WEBCAM_BORDER_COLOR, DEFAULT_WEBCAM_BORDER_STYLE, DEFAULT_WEBCAM_POSITION,
+    WEBCAM_BORDER_STYLES, WEBCAM_POSITIONS, webcam_border_color, webcam_border_layers,
+    webcam_border_style, webcam_devices, webcam_position,
+)
 
 
 MIN_MIC_GAIN = -12
@@ -42,6 +48,8 @@ class RecordingSettings:
     webcam_device: str = ""
     webcam_name: str = ""
     webcam_position: str = DEFAULT_WEBCAM_POSITION
+    webcam_border_style: str = DEFAULT_WEBCAM_BORDER_STYLE
+    webcam_border_color: str = DEFAULT_WEBCAM_BORDER_COLOR
 
     def audio_selections(self):
         return {
@@ -73,6 +81,12 @@ class RecordingPreferences:
             webcam_device=store.value("recording/webcam_device", "", type=str),
             webcam_name=store.value("recording/webcam_name", "", type=str),
             webcam_position=store.value("recording/webcam_position", DEFAULT_WEBCAM_POSITION, type=str),
+            webcam_border_style=webcam_border_style(
+                store.value("recording/webcam_border_style", DEFAULT_WEBCAM_BORDER_STYLE, type=str)
+            ),
+            webcam_border_color=webcam_border_color(
+                store.value("recording/webcam_border_color", DEFAULT_WEBCAM_BORDER_COLOR, type=str)
+            ),
         )
 
     def save(self, settings):
@@ -87,6 +101,8 @@ class RecordingPreferences:
         store.setValue("recording/webcam_device", settings.webcam_device)
         store.setValue("recording/webcam_name", settings.webcam_name)
         store.setValue("recording/webcam_position", settings.webcam_position)
+        store.setValue("recording/webcam_border_style", settings.webcam_border_style)
+        store.setValue("recording/webcam_border_color", settings.webcam_border_color)
         store.sync()
         if store.status() != QSettings.NoError:
             raise OSError("Не удалось записать файл настроек.")
@@ -276,14 +292,67 @@ class RecordingSettingsDialog(QDialog):
             grid.addWidget(button, row, column)
         self.webcam_position_label.setText(webcam_position(selected)[0])
         self.webcam_positions.buttonClicked.connect(self.on_webcam_position_changed)
-        layout.addWidget(placement, alignment=Qt.AlignLeft)
+        preview_row = QHBoxLayout()
+        preview_row.setSpacing(12)
+        preview_row.addWidget(placement)
+        sample = QVBoxLayout()
+        sample.addStretch()
+        preview_label = QLabel("Предпросмотр рамки")
+        preview_label.setObjectName("muted")
+        sample.addWidget(preview_label)
+        self.border_preview = WebcamBorderPreview()
+        sample.addWidget(self.border_preview)
+        sample.addStretch()
+        preview_row.addLayout(sample)
+        preview_row.addStretch()
+        layout.addLayout(preview_row)
         layout.addWidget(self.webcam_position_label)
+
+        border_controls = QWidget()
+        border_row = QHBoxLayout(border_controls)
+        border_row.setContentsMargins(0, 0, 0, 0)
+        border_label = QLabel("Стиль рамки")
+        self.border_style = QComboBox()
+        self.border_style.setAccessibleName(border_label.text())
+        border_label.setBuddy(self.border_style)
+        for style, (name, _) in WEBCAM_BORDER_STYLES.items():
+            self.border_style.addItem(name, style)
+        style = webcam_border_style(settings.webcam_border_style)
+        self.border_style.setCurrentIndex(self.border_style.findData(style))
+        self.border_style.currentIndexChanged.connect(self.update_webcam_border)
+        self.border_color = webcam_border_color(settings.webcam_border_color)
+        self.border_color_button = QPushButton()
+        self.border_color_button.setAccessibleName("Цвет рамки")
+        self.border_color_button.clicked.connect(self.choose_webcam_border_color)
+        border_row.addWidget(border_label)
+        border_row.addWidget(self.border_style, 1)
+        border_row.addWidget(self.border_color_button)
+        layout.addWidget(border_controls)
+        self.update_webcam_border()
+
         self.webcam_enabled.toggled.connect(placement.setEnabled)
         self.webcam_enabled.toggled.connect(self.webcam_device.setEnabled)
+        self.webcam_enabled.toggled.connect(border_controls.setEnabled)
         placement.setEnabled(settings.webcam_enabled)
         self.webcam_device.setEnabled(settings.webcam_enabled)
+        border_controls.setEnabled(settings.webcam_enabled)
         layout.addStretch()
         return tab
+
+    def choose_webcam_border_color(self):
+        color = QColorDialog.getColor(QColor(self.border_color), self, "Цвет рамки веб-камеры")
+        if color.isValid():
+            self.border_color = color.name()
+            self.update_webcam_border()
+
+    def update_webcam_border(self):
+        layers = webcam_border_layers(self.border_style.currentData(), self.border_color)
+        self.border_preview.set_layers(layers)
+        swatch = QPixmap(14, 14)
+        swatch.fill(QColor(self.border_color))
+        self.border_color_button.setIcon(QIcon(swatch))
+        self.border_color_button.setText(f"Цвет {self.border_color.upper()}")
+        self.border_color_button.setEnabled(bool(layers))
 
     def on_webcam_position_changed(self, button):
         self.webcam_position_label.setText(button.accessibleName())
@@ -415,6 +484,7 @@ class RecordingSettingsDialog(QDialog):
                 directory, microphone_gain_db=self.mic_gain.value(),
                 webcam_enabled=self.webcam_enabled.isChecked(),
                 webcam_device=webcam_device, webcam_name=webcam_name, webcam_position=position,
+                webcam_border_style=self.border_style.currentData(), webcam_border_color=self.border_color,
                 **options,
             )
             self.preferences.save(settings)
