@@ -21,7 +21,7 @@ from logger import logger
 from operation_history import history
 from recording_audio import SOURCES
 from recording_settings import RecordingPreferences, RecordingSettingsDialog, format_gain
-from screen_recorder import TARGET_FPS, RecordingHotkey, ScreenRecorder
+from screen_recorder import TARGET_FPS, VK_F9, VK_F12, RecordingHotkey, ScreenRecorder
 from webcam_capture import webcam_position
 
 
@@ -96,6 +96,9 @@ class VideoEditor(QMainWindow):
         if self.recording_hotkey:
             header.addWidget(label("Запуск / остановка записи", "muted"))
             header.addWidget(label("F12", "keycap"))
+            header.addSpacing(8)
+            header.addWidget(label("Пауза", "muted"))
+            header.addWidget(label("F9", "keycap"))
         shell.addLayout(header)
         shell.addWidget(self.tabs, 1)
         self.setStyleSheet(EDITOR_STYLE)
@@ -214,7 +217,7 @@ class VideoEditor(QMainWindow):
         self.recorder.webcam_changed.connect(self.update_recording_summary)
         try:
             self.recording_hotkey = RecordingHotkey(int(self.winId()))
-            hint = "F12 работает, когда игра находится на переднем плане."
+            hint = "F12 запускает и завершает запись. F9 ставит её на паузу и продолжает."
         except OSError as error:
             logger.warning(f"Не удалось настроить F12: {error}")
             hint = "Не удалось настроить F12. Запись доступна по кнопке."
@@ -248,7 +251,13 @@ class VideoEditor(QMainWindow):
         self.recording_button = QPushButton("Начать запись")
         self.recording_button.setProperty("primary", True)
         self.recording_button.clicked.connect(self.toggle_recording)
-        controls_layout.addWidget(self.recording_button)
+        recording_actions = QHBoxLayout()
+        recording_actions.addWidget(self.recording_button, 1)
+        self.pause_button = QPushButton("Пауза")
+        self.pause_button.setEnabled(False)
+        self.pause_button.clicked.connect(self.toggle_recording_pause)
+        recording_actions.addWidget(self.pause_button)
+        controls_layout.addLayout(recording_actions)
         hint_label = label(hint, "muted")
         hint_label.setWordWrap(True)
         controls_layout.addWidget(hint_label)
@@ -337,6 +346,11 @@ class VideoEditor(QMainWindow):
             self.recorder.toggle()
             self.update_recording_controls()
 
+    def toggle_recording_pause(self):
+        if not self.close_after_recording and self.recording_settings_dialog is None:
+            self.recorder.toggle_pause()
+            self.update_recording_controls()
+
     def on_recording_status(self, message):
         self.recording_status.set_message(message)
         self.update_recording_controls()
@@ -344,8 +358,13 @@ class VideoEditor(QMainWindow):
     def update_recording_controls(self):
         active = self.recorder.active
         stopping = active and self.recorder.stopping
-        recording = active and not stopping and self.recorder.fps_sample is not None
-        if stopping:
+        paused = active and self.recorder.paused
+        recording = active and not stopping and not paused and self.recorder.fps_sample is not None
+        if paused:
+            state = "Пауза"
+        elif self.recorder.pausing:
+            state = "Пауза…"
+        elif stopping:
             state = "Сохранение"
         elif recording:
             state = "● REC"
@@ -355,8 +374,14 @@ class VideoEditor(QMainWindow):
             state = "Ожидание"
         self.capture_state.setText(state)
         self.capture_illustration.set_recording(recording)
-        self.recording_button.setText("Остановить запись" if active else "Начать запись")
+        if paused:
+            action = "Завершить запись"
+        else:
+            action = "Остановить запись" if active else "Начать запись"
+        self.recording_button.setText(action)
         self.recording_button.setEnabled(not stopping)
+        self.pause_button.setText("Продолжить" if paused else "Пауза")
+        self.pause_button.setEnabled(active and not stopping)
         self.recording_settings_button.setEnabled(not active)
         for widget in (self.capture_state, self.recording_button):
             if widget.property("recording") != recording:
@@ -370,8 +395,12 @@ class VideoEditor(QMainWindow):
             QTimer.singleShot(0, self.close)
 
     def nativeEvent(self, event_type, message):
-        if self.recording_hotkey and self.recording_hotkey.pressed(event_type, message):
-            QTimer.singleShot(0, self.toggle_recording)
+        if self.recording_hotkey:
+            key = self.recording_hotkey.pressed(event_type, message)
+            if key == VK_F12:
+                QTimer.singleShot(0, self.toggle_recording)
+            elif key == VK_F9:
+                QTimer.singleShot(0, self.toggle_recording_pause)
         return super().nativeEvent(event_type, message)
 
     def closeEvent(self, event):

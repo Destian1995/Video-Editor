@@ -5,6 +5,7 @@ from ctypes import wintypes
 from datetime import datetime
 from pathlib import Path
 import re
+from shutil import rmtree
 from tempfile import mkdtemp
 from time import monotonic, time
 from uuid import uuid4
@@ -14,6 +15,7 @@ from PyQt5.QtWidgets import QApplication, QLabel
 
 from logger import logger
 from recording_audio import AudioCapture, SOURCES, mux_audio_args
+from recording_segments import JoinSegments
 from recording_settings import RecordingSettings, default_recording_directory
 from webcam_capture import DEFAULT_WEBCAM_POSITION, webcam_overlay
 
@@ -21,11 +23,13 @@ from webcam_capture import DEFAULT_WEBCAM_POSITION, webcam_overlay
 TARGET_FPS = 60
 WM_INPUT = 0x00FF
 VK_F12 = 0x7B
+VK_F9 = 0x78
 RIDEV_INPUTSINK = 0x0100
 RID_INPUT = 0x10000003
 RI_KEY_BREAK = 0x0001
 WDA_EXCLUDEFROMCAPTURE = 0x11
 CAPTURE_CLOCK = re.compile(rb"showinfo@capture_clock[^\r\n]*?\bpts:\s*(\d+)")
+NO_RECORDED_FRAMES = "Запись отменена до получения первого кадра."
 
 
 class RawInputDevice(ctypes.Structure):
@@ -69,7 +73,7 @@ class RecordingHotkey:
             ctypes.POINTER(wintypes.UINT), wintypes.UINT,
         ]
         self.read_input.restype = wintypes.UINT
-        self.f12_down = False
+        self.keys_down = set()
 
     def pressed(self, event_type, message):
         if event_type != b"windows_generic_MSG":
@@ -84,11 +88,15 @@ class RecordingHotkey:
             event.lParam, RID_INPUT, ctypes.byref(raw),
             ctypes.byref(size), ctypes.sizeof(RawInputHeader),
         )
-        if read != ctypes.sizeof(raw) or raw.header.type != 1 or raw.virtual_key != VK_F12:
+        if read != ctypes.sizeof(raw) or raw.header.type != 1 or raw.virtual_key not in (VK_F9, VK_F12):
             return False
-        was_down = self.f12_down
-        self.f12_down = not bool(raw.flags & RI_KEY_BREAK)
-        return self.f12_down and not was_down
+        key = raw.virtual_key
+        if raw.flags & RI_KEY_BREAK:
+            self.keys_down.discard(key)
+        elif key not in self.keys_down:
+            self.keys_down.add(key)
+            return key
+        return False
 
 
 def recording_args(path, audio=False, camera="", position=DEFAULT_WEBCAM_POSITION):
@@ -100,9 +108,10 @@ def recording_args(path, audio=False, camera="", position=DEFAULT_WEBCAM_POSITIO
         capture = webcam_overlay(capture, position)
     graph = f"{capture}[screen]"
     if audio:
-        # Timestamp the first frame with the same clock used by the audio callbacks.
+        # Timestamp only the first frame. The clock branch must reach EOF so
+        # it cannot keep the live webcam input running when FFmpeg stops.
         graph = (
-            f"{capture},split[screen][clock];[clock]select=eq(n\\,0),"
+            f"{capture},split[screen][clock];[clock]trim=end_frame=1,"
             "settb=1/1000000,setpts=RTCTIME,showinfo@capture_clock,nullsink"
         )
     args = [
@@ -145,8 +154,17 @@ class ScreenRecorder(QObject):
         self.mux = QProcess(self)
         self.mux.finished.connect(self._on_mux_finished)
         self.mux.errorOccurred.connect(self._on_mux_error)
+        self.video_probe = QProcess(self)
+        self.video_probe.finished.connect(self._on_video_probe_finished)
+        self.video_probe.errorOccurred.connect(self._on_video_probe_error)
         self.settings = settings if settings is not None else RecordingSettings(default_recording_directory())
         self.work_dir = None
+        self.join_job = None
+        self.segments = []
+        self.session_warnings = []
+        self.keep_work_dir = False
+        self.paused = False
+        self.pausing = False
         self.audio_job = None
         self.audio_names = {}
         self.audio_errors = {}
@@ -199,11 +217,25 @@ class ScreenRecorder(QObject):
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         name = f"game_{timestamp}_{uuid4().hex}"
         self.output_path = directory / f"{name}.mp4"
-        self.partial_path = self.work_dir / "video.mp4"
-        self.mixed_path = self.work_dir / "mixed.mp4"
+        self.segments = []
+        self.session_warnings = []
+        self.keep_work_dir = False
+        self.paused = False
+        self.pausing = False
+        self._start_segment()
+
+    def _start_segment(self):
+        try:
+            self.segment_dir = Path(mkdtemp(prefix="capture-", dir=self.work_dir))
+        except OSError as error:
+            self._segment_failed(f"Не удалось подготовить фрагмент записи. {error}")
+            return
+        self.partial_path = self.segment_dir / "video.mp4"
+        self.mixed_path = self.segment_dir / "mixed.mp4"
         self.stopping = False
         self.video_started = False
         self.video_result = None
+        self.video_warning = ""
         self.video_start = None
         self.audio_names = {}
         self.audio_errors = {}
@@ -223,7 +255,7 @@ class ScreenRecorder(QObject):
         self.webcam_changed.emit()
         selections = self.settings.audio_selections()
         if selections:
-            self.audio_job = AudioCapture(self.work_dir, selections, self)
+            self.audio_job = AudioCapture(self.segment_dir, selections, self)
             self.audio_job.ready.connect(self._on_audio_ready)
             self.audio_job.finished.connect(self._on_audio_finished)
             self.audio_job.start()
@@ -265,16 +297,36 @@ class ScreenRecorder(QObject):
             self._finalize_video()
         elif not self.video_started:
             if self.stopping:
-                self._finish_session("Запись отменена до получения первого кадра.")
+                self._segment_failed(NO_RECORDED_FRAMES)
             else:
                 self._start_video()
 
     def stop(self):
-        if not self.active or self.stopping:
+        if not self.active:
             return
+        if self.paused:
+            self._finish_segments()
+        elif self.pausing:
+            self.pausing = False
+            self.status_changed.emit("Сохранение записи…")
+        elif not self.stopping:
+            self._stop_segment()
+
+    def toggle_pause(self):
+        if not self.active:
+            return
+        if self.paused:
+            self.paused = False
+            self._start_segment()
+        elif not self.stopping:
+            self.pausing = True
+            self._stop_segment()
+
+    def _stop_segment(self):
         self.stopping = True
-        self.status_changed.emit("Сохранение записи…")
-        self._show_overlay("Сохранение записи…")
+        message = "Постановка на паузу…" if self.pausing else "Сохранение записи…"
+        self.status_changed.emit(message)
+        self._show_overlay(message)
         if not self.video_started and self.audio_job:
             self.audio_job.stop()
         if self.process.state() == QProcess.Running:
@@ -343,13 +395,13 @@ class ScreenRecorder(QObject):
         self._read_errors()
         if self.webcam_in_use and not self.frame_count:
             if self.stopping:
-                self._complete_video(False, "Запись отменена до получения первого кадра.")
+                self._complete_video(False, NO_RECORDED_FRAMES)
                 return
             self._retry_without_webcam()
             return
         self.overlay.hide()
         if exit_status == QProcess.NormalExit and exit_code == 0:
-            self._complete_video(bool(self.frame_count), "Запись отменена до получения первого кадра.")
+            self._complete_video(bool(self.frame_count), NO_RECORDED_FRAMES)
         else:
             details = self.error_buffer.decode("utf-8", errors="replace").strip()
             if details:
@@ -384,12 +436,36 @@ class ScreenRecorder(QObject):
 
     def _finalize_video(self):
         success, message = self.video_result
-        if not success:
-            keep = bool(self.frame_count and self.partial_path.is_file())
-            if keep:
-                message += f"\nНезавершённые файлы: {self.work_dir}"
-            self._finish_session(message, cleanup=not keep)
-        elif self.audio_tracks:
+        if success:
+            self._save_recorded_video()
+        elif self.frame_count and self.partial_path.is_file():
+            # FFmpeg can close a playable MP4 even after losing the DXGI output.
+            self.status_changed.emit("Проверка записанного фрагмента…")
+            self.video_probe.start("ffprobe", [
+                "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_type",
+                "-of", "csv=p=0", str(self.partial_path),
+            ])
+        else:
+            self._segment_failed(message)
+
+    def _on_video_probe_finished(self, code, status):
+        output = bytes(self.video_probe.readAllStandardOutput()).strip()
+        if status == QProcess.NormalExit and code == 0 and output == b"video":
+            self.video_warning = "Захват экрана прервался. Сохранён записанный фрагмент."
+            self._save_recorded_video()
+        else:
+            self._keep_incomplete_video()
+
+    def _on_video_probe_error(self, error):
+        if error == QProcess.FailedToStart:
+            self._keep_incomplete_video()
+
+    def _keep_incomplete_video(self):
+        _, message = self.video_result
+        self._segment_failed(f"{message}\nНезавершённые файлы: {self.work_dir}", cleanup=False)
+
+    def _save_recorded_video(self):
+        if self.audio_tracks:
             self.status_changed.emit("Сохранение MP4 со звуком…")
             if self.video_start is None:
                 self.video_start = self.video_launch_time
@@ -424,32 +500,89 @@ class ScreenRecorder(QObject):
         )
 
     def _publish(self, path, warning="", cleanup=True):
+        notices = [notice for notice in (warning, self.video_warning, self.webcam_warning) if notice]
+        if self.audio_errors:
+            sources = ", ".join(SOURCES[source] for source in self.audio_errors)
+            notices.append(f"Предупреждение по аудио: {sources}.")
+            logger.warning(f"Проблемы захвата аудио: {self.audio_errors}")
+        self.keep_work_dir = self.keep_work_dir or not cleanup
+        self.session_warnings.extend(notices)
+        if self.pausing or self.segments:
+            self.segments.append((path, path == self.mixed_path))
+            if self.pausing:
+                self._enter_pause()
+            else:
+                self._finish_segments()
+        else:
+            self._publish_final(path)
+
+    def _segment_failed(self, message, cleanup=True):
+        self.keep_work_dir = self.keep_work_dir or not cleanup
+        if self.pausing:
+            if message != NO_RECORDED_FRAMES:
+                self.session_warnings.append(message)
+            self._enter_pause()
+        elif self.segments:
+            if message != NO_RECORDED_FRAMES:
+                self.session_warnings.append(message)
+            self._finish_segments()
+        else:
+            self._finish_session(message, cleanup=not self.keep_work_dir)
+
+    def _enter_pause(self):
+        self.pausing = False
+        self.paused = True
+        self.stopping = False
+        self.status_changed.emit("Запись на паузе. F9 — продолжить, F12 — завершить.")
+        self._show_overlay("Ⅱ ПАУЗА  |  F9 — продолжить")
+
+    def _finish_segments(self):
+        self.paused = False
+        self.pausing = False
+        self.stopping = True
+        if not self.segments:
+            self._finish_session(NO_RECORDED_FRAMES, cleanup=not self.keep_work_dir)
+        elif len(self.segments) == 1:
+            self._publish_final(self.segments[0][0])
+        else:
+            self.status_changed.emit("Объединение фрагментов записи…")
+            self._show_overlay("Объединение фрагментов…")
+            self.join_job = JoinSegments(tuple(self.segments), self.work_dir / "joined.mp4", self)
+            self.join_job.finished.connect(self._on_segments_joined)
+            self.join_job.start()
+
+    def _on_segments_joined(self):
+        job = self.join_job
+        self.join_job = None
+        if job.error:
+            logger.error(f"Не удалось объединить фрагменты: {job.error}")
+            self._finish_session(f"Не удалось объединить запись. Фрагменты сохранены в {self.work_dir}", cleanup=False)
+        else:
+            self._publish_final(job.output)
+        job.deleteLater()
+
+    def _publish_final(self, path):
         try:
             path.rename(self.output_path)
         except OSError as error:
             self._finish_session(f"Не удалось переместить готовый файл {path}. {error}", cleanup=False)
             return
         message = f"Запись сохранена.\n{self.output_path}"
-        if warning:
-            message += f"\n{warning}"
-        if self.webcam_warning:
-            message += f"\n{self.webcam_warning}"
-        if self.audio_errors:
-            sources = ", ".join(SOURCES[source] for source in self.audio_errors)
-            message += f"\nПредупреждение по аудио: {sources}."
-            logger.warning(f"Проблемы захвата аудио: {self.audio_errors}")
+        for notice in dict.fromkeys(self.session_warnings):
+            message += f"\n{notice}"
         logger.info(f"Запись экрана сохранена: {self.output_path}")
-        self._finish_session(message, cleanup)
+        self._finish_session(message, cleanup=not self.keep_work_dir)
 
     def _finish_session(self, message, cleanup=True):
         directory = self.work_dir
         self.work_dir = None
+        self.segments = []
+        self.paused = False
+        self.pausing = False
         self.overlay.hide()
         if cleanup:
             try:
-                for name in ("video.mp4", "mixed.mp4", "game.pcm", "microphone.pcm"):
-                    (directory / name).unlink(missing_ok=True)
-                directory.rmdir()
+                rmtree(directory)
             except OSError as error:
                 logger.warning(f"Не удалось убрать временные файлы записи: {error}")
         self.status_changed.emit(message)

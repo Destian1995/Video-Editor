@@ -45,7 +45,7 @@ def webcam_overlay(graph, position):
     return (
         f"{graph}[desktop];"
         "[0:v]setpts=PTS-STARTPTS,scale=320:180:force_original_aspect_ratio=decrease:"
-        "force_divisible_by=2,pad=320:180:(ow-iw)/2:(oh-ih)/2,setsar=1[camera];"
+        "force_divisible_by=2,setsar=1,pad=iw+8:ih+8:4:4:color=0xbb9dff[camera];"
         f"[desktop]setpts=PTS-STARTPTS[desktop_start];"
         f"[desktop_start][camera]overlay=x={x}:y={y}:eof_action=pass:repeatlast=0"
     )
