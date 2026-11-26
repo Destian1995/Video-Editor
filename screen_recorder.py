@@ -3,6 +3,7 @@
 import ctypes
 from ctypes import wintypes
 from datetime import datetime
+from math import cos, tau
 from pathlib import Path
 import re
 from shutil import rmtree
@@ -10,7 +11,8 @@ from tempfile import mkdtemp
 from time import monotonic, time
 from uuid import uuid4
 
-from PyQt5.QtCore import QObject, QProcess, Qt, QTimer, pyqtSignal
+from PyQt5.QtCore import QAbstractAnimation, QObject, QPointF, QProcess, Qt, QTimer, QVariantAnimation, pyqtSignal
+from PyQt5.QtGui import QColor, QPainter
 from PyQt5.QtWidgets import QApplication, QLabel
 
 from logger import logger
@@ -145,6 +147,41 @@ def recording_args(
     return args + ["-f", "mp4", str(path)]
 
 
+class RecordingOverlay(QLabel):
+    def __init__(self):
+        super().__init__(
+            None, Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
+            | Qt.WindowTransparentForInput | Qt.WindowDoesNotAcceptFocus,
+        )
+        self.dot_opacity = None
+        self.setAttribute(Qt.WA_ShowWithoutActivating)
+        self.setStyleSheet(
+            "QLabel { background: #25192e; color: #ffd6e2; padding: 8px 12px; "
+            "border: 1px solid #79425d; font: bold 14px 'Segoe UI'; }"
+        )
+
+    def set_pulsing(self, enabled):
+        self.dot_opacity = 0.0 if enabled else None
+        self.setIndent(16 if enabled else 0)
+        self.update()
+
+    def set_pulse_phase(self, phase):
+        self.dot_opacity = (1 - cos(tau * phase)) / 2
+        self.update()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if not self.dot_opacity:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(Qt.NoPen)
+        color = QColor("#ffd6e2")
+        color.setAlphaF(self.dot_opacity)
+        painter.setBrush(color)
+        painter.drawEllipse(QPointF(17, self.height() / 2), 4, 4)
+
+
 class ScreenRecorder(QObject):
     status_changed = pyqtSignal(str)
     audio_changed = pyqtSignal()
@@ -192,20 +229,15 @@ class ScreenRecorder(QObject):
         self.frame_count = 0
         self.fps_sample = None
 
-        self.overlay = QLabel(
-            None, Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
-            | Qt.WindowTransparentForInput | Qt.WindowDoesNotAcceptFocus,
-        )
-        self.overlay.setAttribute(Qt.WA_ShowWithoutActivating)
-        self.overlay.setStyleSheet(
-            "QLabel { background: #25192e; color: #ffd6e2; padding: 8px 12px; "
-            "border: 1px solid #79425d; font: bold 14px 'Segoe UI'; }"
-        )
+        self.overlay = RecordingOverlay()
         if not exclude_from_capture(int(self.overlay.winId())):
             logger.warning("Windows не смогла исключить индикатор из захвата")
-        self.overlay_blink = QTimer(self)
-        self.overlay_blink.setInterval(600)
-        self.overlay_blink.timeout.connect(self._blink_overlay)
+        self.overlay_pulse = QVariantAnimation(self)
+        self.overlay_pulse.setDuration(1600)
+        self.overlay_pulse.setStartValue(0.0)
+        self.overlay_pulse.setEndValue(1.0)
+        self.overlay_pulse.setLoopCount(-1)
+        self.overlay_pulse.valueChanged.connect(self.overlay.set_pulse_phase)
 
     @property
     def active(self):
@@ -391,27 +423,25 @@ class ScreenRecorder(QObject):
         self.process.closeWriteChannel()
 
     def _show_overlay(self, text):
-        self.overlay_blink.stop()
+        self.overlay_pulse.stop()
+        self.overlay.set_pulsing(False)
         self._set_overlay_text(text)
 
     def show_ready(self):
         if not self.active:
-            self._show_blinking_overlay("ГОТОВО  |  F12 — начать")
+            self._show_pulsing_overlay("ГОТОВО  |  F12 — начать")
 
     def hide_overlay(self):
-        self.overlay_blink.stop()
+        self.overlay_pulse.stop()
         self.overlay.hide()
 
-    def _show_blinking_overlay(self, text):
-        self.blink_text = text
-        self.blink_visible = True
-        self._set_overlay_text(f"●  {text}")
-        self.overlay_blink.start()
-
-    def _blink_overlay(self):
-        self.blink_visible = not self.blink_visible
-        marker = "●" if self.blink_visible else "○"
-        self._set_overlay_text(f"{marker}  {self.blink_text}")
+    def _show_pulsing_overlay(self, text):
+        if self.overlay_pulse.state() == QAbstractAnimation.Running and self.overlay.text() == text:
+            return
+        self.overlay_pulse.stop()
+        self.overlay.set_pulsing(True)
+        self._set_overlay_text(text)
+        self.overlay_pulse.start()
 
     def _set_overlay_text(self, text):
         self.overlay.setText(text)
@@ -620,7 +650,7 @@ class ScreenRecorder(QObject):
         self.paused = True
         self.stopping = False
         self.status_changed.emit("Запись на паузе. F9 — продолжить, F12 — завершить.")
-        self._show_blinking_overlay("ПАУЗА  |  F9 — продолжить")
+        self._show_pulsing_overlay("ПАУЗА  |  F9 — продолжить")
 
     def _finish_segments(self):
         self.paused = False
