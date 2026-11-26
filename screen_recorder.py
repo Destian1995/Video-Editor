@@ -107,16 +107,16 @@ class RecordingHotkey:
 def recording_args(
     path, audio=False, camera="", position=DEFAULT_WEBCAM_POSITION,
     border_style=DEFAULT_WEBCAM_BORDER_STYLE, border_color=DEFAULT_WEBCAM_BORDER_COLOR,
-    region=None, camera_size=DEFAULT_WEBCAM_SIZE,
+    region=None, camera_size=DEFAULT_WEBCAM_SIZE, hardware=False,
 ):
-    source = "[0:v]setpts=PTS-STARTPTS" if region is not None else (
-        f"ddagrab=output_idx=0:framerate={TARGET_FPS}:draw_mouse=0,hwdownload"
-    )
-    capture = f"{source},format=bgra,pad=ceil(iw/2)*2:ceil(ih/2)*2"
+    # Opening DirectShow after the screen source can starve screen capture
+    # even when both sources keep up on their own.
+    desktop_input = int(bool(camera))
+    capture = f"[{desktop_input}:v]setpts=PTS-STARTPTS,format=bgra,pad=ceil(iw/2)*2:ceil(ih/2)*2"
     if camera:
         capture = webcam_overlay(
             capture, position, border_style, border_color,
-            input_index=int(region is not None), region=region, size=camera_size,
+            input_index=0, region=region, size=camera_size,
         )
     graph = f"{capture}[screen]"
     if audio:
@@ -130,16 +130,28 @@ def recording_args(
         "-hide_banner", "-loglevel", "info" if audio else "warning", "-nostats", "-n",
         "-stats_period", "1", "-progress", "pipe:1",
     ]
-    if region is not None:
-        args += region.ffmpeg_args(TARGET_FPS)
     if camera:
         args += [
-            "-thread_queue_size", "32", "-rtbufsize", "64M", "-f", "dshow", "-analyzeduration", "0",
+            "-thread_queue_size", "8", "-rtbufsize", "24M", "-f", "dshow",
+            "-use_video_device_timestamps", "0", "-analyzeduration", "0",
             "-i", f"video={camera}",
         ]
+    if region is not None:
+        args += region.ffmpeg_args(TARGET_FPS)
+    else:
+        args += [
+            "-thread_queue_size", "4", "-f", "lavfi", "-i",
+            f"ddagrab=output_idx=0:framerate={TARGET_FPS}:draw_mouse=0,hwdownload,format=bgra",
+        ]
+    args += ["-filter_complex", graph, "-map", "[screen]"]
+    if hardware:
+        args += [
+            "-c:v", "h264_nvenc", "-preset", "p2", "-tune", "ll", "-rc", "vbr",
+            "-cq", "21", "-b:v", "0", "-bf", "0",
+        ]
+    else:
+        args += ["-c:v", "libx264", "-preset", "ultrafast" if region is None else "veryfast", "-crf", "20"]
     args += [
-        "-filter_complex", graph, "-map", "[screen]",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
         "-profile:v", "high", "-pix_fmt", "yuv420p",
         "-g", str(TARGET_FPS * 2), "-fps_mode", "vfr",
     ]
@@ -200,6 +212,15 @@ class ScreenRecorder(QObject):
         self.webcam_timeout = QTimer(self)
         self.webcam_timeout.setSingleShot(True)
         self.webcam_timeout.timeout.connect(self._on_webcam_timeout)
+        self.encoder_probe = QProcess(self)
+        self.encoder_probe.finished.connect(self._encoder_probe_finished)
+        self.encoder_probe.errorOccurred.connect(self._encoder_probe_error)
+        self.encoder_probe_timeout = QTimer(self)
+        self.encoder_probe_timeout.setSingleShot(True)
+        self.encoder_probe_timeout.timeout.connect(self.encoder_probe.kill)
+        self.nvenc_available = None
+        self.using_nvenc = False
+        self.waiting_for_encoder = False
         self.mux = QProcess(self)
         self.mux.finished.connect(self._on_mux_finished)
         self.mux.errorOccurred.connect(self._on_mux_error)
@@ -286,6 +307,8 @@ class ScreenRecorder(QObject):
         self.mixed_path = self.segment_dir / "mixed.mp4"
         self.stopping = False
         self.video_started = False
+        self.using_nvenc = False
+        self.waiting_for_encoder = False
         self.video_result = None
         self.video_warning = ""
         self.video_start = None
@@ -327,9 +350,22 @@ class ScreenRecorder(QObject):
             self._start_video()
 
     def _start_video(self):
+        if self.capture_region is None and self.nvenc_available is None:
+            self.waiting_for_encoder = True
+            if self.encoder_probe.state() == QProcess.NotRunning:
+                self.encoder_probe.start("ffmpeg", [
+                    "-hide_banner", "-nostdin", "-loglevel", "error", "-f", "lavfi",
+                    "-i", "color=size=320x240:rate=60", "-frames:v", "1",
+                    "-c:v", "h264_nvenc", "-preset", "p2", "-pix_fmt", "yuv420p", "-f", "null", "-",
+                ])
+                self.encoder_probe_timeout.start(3000)
+            return
         self.video_started = True
         self.video_launch_time = time()
         options = {"audio": bool(self.audio_names)}
+        self.using_nvenc = self.capture_region is None and self.nvenc_available
+        if self.using_nvenc:
+            options["hardware"] = True
         if self.capture_region is not None:
             options["region"] = self.capture_region
         if self.webcam_in_use:
@@ -340,6 +376,21 @@ class ScreenRecorder(QObject):
             options["camera_size"] = self.settings.webcam_size
             self.webcam_timeout.start(12000)
         self.process.start("ffmpeg", recording_args(self.partial_path, **options))
+
+    def _encoder_probe_finished(self, code, status):
+        self._finish_encoder_probe(status == QProcess.NormalExit and code == 0)
+
+    def _encoder_probe_error(self, error):
+        if error == QProcess.FailedToStart:
+            self._finish_encoder_probe(False)
+
+    def _finish_encoder_probe(self, available):
+        self.encoder_probe_timeout.stop()
+        self.nvenc_available = available
+        waiting = self.waiting_for_encoder
+        self.waiting_for_encoder = False
+        if waiting and self.active and not self.stopping and not self.paused and not self.video_started:
+            self._start_video()
 
     def _on_webcam_timeout(self):
         if self.webcam_in_use and not self.frame_count and self.process.state() != QProcess.NotRunning:
@@ -410,9 +461,13 @@ class ScreenRecorder(QObject):
             message = "Постановка на паузу…" if self.pausing else "Сохранение записи…"
         self.status_changed.emit(message)
         self._show_overlay(message)
-        if not self.video_started and self.audio_job:
-            self.audio_job.stop()
-        if self.process.state() == QProcess.Running:
+        if not self.video_started:
+            self.waiting_for_encoder = False
+            if self.audio_job:
+                self.audio_job.stop()
+            else:
+                self._segment_failed(NO_RECORDED_FRAMES)
+        elif self.process.state() == QProcess.Running:
             self._request_ffmpeg_stop()
 
     def _on_started(self):
@@ -476,7 +531,8 @@ class ScreenRecorder(QObject):
         self.fps_sample = (self.frame_count, now)
         if not self.stopping:
             if first_sample:
-                self.status_changed.emit("Идёт запись.")
+                encoder = "NVIDIA NVENC" if self.using_nvenc else "CPU"
+                self.status_changed.emit(f"Идёт запись. Кодирование: {encoder}.")
             self._show_overlay(f"● REC  |  {fps_text} FPS записи")
 
     def _read_errors(self):
@@ -497,6 +553,11 @@ class ScreenRecorder(QObject):
         self.webcam_timeout.stop()
         self._read_progress()
         self._read_errors()
+        if not self.frame_count and not self.stopping and self.using_nvenc and b"h264_nvenc" in self.error_buffer:
+            logger.warning(f"NVIDIA NVENC недоступен: {self.error_buffer.decode('utf-8', errors='replace')}")
+            self.nvenc_available = False
+            self._retry_capture("Аппаратное кодирование недоступно. Запуск записи на CPU…")
+            return
         if self.webcam_in_use and not self.frame_count:
             if self.stopping:
                 self._complete_video(False, NO_RECORDED_FRAMES)
@@ -519,18 +580,21 @@ class ScreenRecorder(QObject):
 
     def _retry_without_webcam(self):
         logger.warning(f"Запуск с веб-камерой не удался: {self.error_buffer.decode('utf-8', errors='replace')}")
+        self.webcam_in_use = False
+        self.webcam_warning = "Веб-камера недоступна. Видео записано без вставки."
+        self.webcam_changed.emit()
+        self._retry_capture("Камера недоступна. Запуск записи экрана…")
+
+    def _retry_capture(self, message):
         try:
             self.partial_path.unlink(missing_ok=True)
         except OSError as error:
-            self._complete_video(False, f"Не удалось перезапустить запись без веб-камеры. {error}")
+            self._complete_video(False, f"Не удалось перезапустить запись. {error}")
             return
-        self.webcam_in_use = False
-        self.webcam_warning = "Веб-камера недоступна. Видео записано без вставки."
         self.progress_buffer = b""
         self.error_buffer = b""
         self.video_start = None
-        self.webcam_changed.emit()
-        self.status_changed.emit("Камера недоступна. Запуск записи экрана…")
+        self.status_changed.emit(message)
         self._start_video()
 
     def _complete_video(self, success, message):
