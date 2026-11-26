@@ -71,6 +71,18 @@ def _window_monitor_bounds(window_id):
     return _monitor_bounds(user32, from_window(window_id, 2))
 
 
+def default_capture_region(window_id):
+    monitor = _window_monitor_bounds(window_id)
+    width, height = monitor.width() // 4 * 2, monitor.height() // 4 * 2
+    if width < 2 or height < 2:
+        return None
+    return CaptureRegion(
+        monitor.x() + (monitor.width() - width) // 2,
+        monitor.y() + (monitor.height() - height) // 2,
+        width, height,
+    )
+
+
 def _region_monitor_bounds(region):
     user32 = ctypes.WinDLL("user32")
     from_rect = user32.MonitorFromRect
@@ -216,6 +228,9 @@ class RegionOutline(QWidget):
         self.windowHandle().setScreen(screen)
         self.set_region(region)
         exclude_from_capture(int(self.winId()))
+
+    def contains_region(self, region):
+        return self.monitor.contains(QRect(region.x, region.y, region.width, region.height))
 
     def set_region(self, region):
         self.area = region

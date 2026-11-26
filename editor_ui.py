@@ -7,7 +7,7 @@ import sys
 
 from PyQt5.QtCore import QEasingCurve, QPointF, QRectF, Qt, QVariantAnimation
 from PyQt5.QtGui import (
-    QColor, QLinearGradient, QPainter, QPen, QPixmap, QPolygonF, QRadialGradient, QTextOption,
+    QColor, QIcon, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QPolygonF, QRadialGradient, QTextOption,
 )
 from PyQt5.QtWidgets import (
     QFrame, QGraphicsOpacityEffect, QLabel, QSizePolicy, QTabBar,
@@ -43,6 +43,39 @@ def card():
     layout.setContentsMargins(20, 18, 20, 18)
     layout.setSpacing(13)
     return widget, layout
+
+
+def recording_mode_icon(mode):
+    pixmap = QPixmap(40, 40)
+    pixmap.setDevicePixelRatio(2)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing)
+    color = QColor("#e4d3ff")
+    painter.setPen(QPen(color, 1.45, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+    if mode == "game":
+        controller = QPainterPath(QPointF(6, 5))
+        controller.lineTo(14, 5)
+        controller.cubicTo(17, 5, 18.2, 7.2, 19, 13.2)
+        controller.cubicTo(19.3, 16.3, 17.4, 17.1, 15.5, 15.4)
+        controller.lineTo(13, 13.2)
+        controller.lineTo(7, 13.2)
+        controller.lineTo(4.5, 15.4)
+        controller.cubicTo(2.6, 17.1, .7, 16.3, 1, 13.2)
+        controller.cubicTo(1.8, 7.2, 3, 5, 6, 5)
+        painter.drawPath(controller)
+        painter.drawLine(QPointF(4.4, 9.2), QPointF(8.3, 9.2))
+        painter.drawLine(QPointF(6.35, 7.25), QPointF(6.35, 11.15))
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(color)
+        painter.drawEllipse(QPointF(12.8, 10), .9, .9)
+        painter.drawEllipse(QPointF(15, 8), .9, .9)
+    else:
+        painter.drawRoundedRect(QRectF(1.8, 5.5, 11.5, 9), 2, 2)
+        painter.drawPolyline(QPolygonF([QPointF(13.3, 8.7), QPointF(18.2, 6.2),
+                                       QPointF(18.2, 13.8), QPointF(13.3, 11.3)]))
+    painter.end()
+    return QIcon(pixmap)
 
 
 class AnimatedTabBar(QTabBar):
@@ -432,6 +465,9 @@ QPushButton[recording="true"] {
     border-color: #ff94af;
 }
 QPushButton[recording="true"]:hover { background: #ffb3c7; }
+QPushButton#recordingMode { padding: 4px 10px; }
+QPushButton#recordingMode:checked { background: #493660; border-color: #bb9dff; color: #f4f0ff; }
+QPushButton#recordingMode:checked:disabled { background: #352945; border-color: #695784; }
 QFrame#webcamPlacement { background: #14121e; border: 1px solid #514467; border-radius: 10px; }
 QPushButton#webcamPosition { padding: 4px 12px; font-size: 16px; }
 QPushButton#webcamPosition:checked { background: #bb9dff; border-color: #bb9dff; color: #191127; }
