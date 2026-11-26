@@ -8,6 +8,7 @@ __pycache__/
 .env.*
 *.log
 operation_history.json
+/Video Editor.lnk
 
 .video-editor-*/
 *.mp4
