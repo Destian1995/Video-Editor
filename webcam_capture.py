@@ -46,6 +46,17 @@ def webcam_border_layers(style, color):
     return [(width, fixed_color or accent) for width, fixed_color in layers]
 
 
+def webcam_frame_filter(width, height, border_style, border_color):
+    border = "".join(
+        f",pad=iw+{2 * edge}:ih+{2 * edge}:{edge}:{edge}:color=0x{color[1:]}"
+        for edge, color in webcam_border_layers(border_style, border_color)
+    )
+    return (
+        f"scale={width}:{height}:force_original_aspect_ratio=decrease:"
+        f"force_divisible_by=2,setsar=1{border}"
+    )
+
+
 def webcam_devices():
     result = run_media(
         ["ffmpeg", "-hide_banner", "-list_devices", "true", "-f", "dshow", "-i", "dummy"],
@@ -76,14 +87,10 @@ def webcam_overlay(
         margin = min(margin, min(region.width, region.height) // 8)
     x = x.format(margin=margin)
     y = y.format(margin=margin)
-    border = "".join(
-        f",pad=iw+{2 * width}:ih+{2 * width}:{width}:{width}:color=0x{color[1:]}"
-        for width, color in webcam_border_layers(border_style, border_color)
-    )
+    frame = webcam_frame_filter(width, height, border_style, border_color)
     return (
         f"{graph}[desktop];"
-        f"[{input_index}:v]setpts=PTS-STARTPTS,scale={width}:{height}:force_original_aspect_ratio=decrease:"
-        f"force_divisible_by=2,setsar=1{border}[camera];"
+        f"[{input_index}:v]setpts=PTS-STARTPTS,{frame}[camera];"
         f"[desktop]setpts=PTS-STARTPTS[desktop_start];"
         f"[desktop_start][camera]overlay=x={x}:y={y}:eof_action=pass:repeatlast=0"
     )

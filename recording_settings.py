@@ -23,6 +23,7 @@ from webcam_capture import (
     WEBCAM_BORDER_STYLES, WEBCAM_POSITIONS, webcam_border_color, webcam_border_layers,
     webcam_border_style, webcam_devices, webcam_position,
 )
+from webcam_preview import WebcamPreviewDialog
 
 
 MIN_MIC_GAIN = -12
@@ -338,6 +339,9 @@ class RecordingSettingsDialog(QDialog):
         border_row.addWidget(self.border_color_button)
         layout.addWidget(border_controls)
         self.update_webcam_border()
+        test_camera = QPushButton("Проверить веб-камеру")
+        test_camera.clicked.connect(self.test_webcam)
+        layout.addWidget(test_camera, alignment=Qt.AlignLeft)
 
         self.webcam_enabled.toggled.connect(placement.setEnabled)
         self.webcam_enabled.toggled.connect(self.webcam_device.setEnabled)
@@ -347,6 +351,16 @@ class RecordingSettingsDialog(QDialog):
         border_controls.setEnabled(settings.webcam_enabled)
         layout.addStretch()
         return tab
+
+    def test_webcam(self):
+        device = self.webcam_device.currentData()
+        if not device:
+            self.webcam_status.setText("Выберите веб-камеру для проверки.")
+            self.webcam_status.show()
+            return
+        preview = WebcamPreviewDialog(device, self.border_style.currentData(), self.border_color, self)
+        preview.exec_()
+        preview.deleteLater()
 
     def choose_webcam_border_color(self):
         color = QColorDialog.getColor(QColor(self.border_color), self, "Цвет рамки веб-камеры")

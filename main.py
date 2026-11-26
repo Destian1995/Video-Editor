@@ -23,7 +23,7 @@ from operation_history import history
 from recording_audio import SOURCES
 from recording_settings import RecordingPreferences, RecordingSettingsDialog, format_gain
 from screen_recorder import TARGET_FPS, VK_F9, VK_F12, RecordingHotkey, ScreenRecorder
-from screen_region import RECORDING_MODES, ScreenRegionSelector, region_is_available
+from screen_region import RECORDING_MODES, RegionOutline, ScreenRegionSelector, region_is_available
 from webcam_capture import WEBCAM_BORDER_STYLES, webcam_border_style, webcam_position
 
 
@@ -67,6 +67,7 @@ class VideoEditor(QMainWindow):
         self.recording_settings_dialog = None
         self.close_after_recording = False
         self.region_selector = None
+        self.region_outline = None
         self.region_restore_state = None
         self.region_start_timer = QTimer(self)
         self.region_start_timer.setSingleShot(True)
@@ -336,6 +337,7 @@ class VideoEditor(QMainWindow):
             return
         dialog = RecordingSettingsDialog(self.recording_preferences, self.recorder.settings, self)
         self.recording_settings_dialog = dialog
+        self.recorder.hide_overlay()
         try:
             if dialog.exec_() == QDialog.Accepted:
                 self.recorder.settings = dialog.result_settings
@@ -347,6 +349,7 @@ class VideoEditor(QMainWindow):
         finally:
             self.recording_settings_dialog = None
             dialog.deleteLater()
+            self.update_ready_overlay()
 
     def update_recording_summary(self):
         settings = self.recorder.settings
@@ -411,6 +414,7 @@ class VideoEditor(QMainWindow):
             self.recording_status.set_message(str(error))
             logger.warning(str(error))
         self.update_region_controls()
+        self.update_ready_overlay()
 
     def update_region_controls(self):
         settings = self.recorder.settings
@@ -431,6 +435,7 @@ class VideoEditor(QMainWindow):
         self.start_after_region_selection = start_after_selection
         self.region_selector = ScreenRegionSelector(self)
         self.region_selector.selected.connect(self.finish_region_selection)
+        self.recorder.hide_overlay()
         self.hide()
         self.region_selector.open()
 
@@ -446,17 +451,56 @@ class VideoEditor(QMainWindow):
             self.setWindowState(self.region_selection_state)
             self.show()
         self.update_recording_controls()
+        self.update_ready_overlay()
 
     def prepare_region_capture(self, previous_state):
         self.region_restore_state = None if previous_state & Qt.WindowMinimized else previous_state
-        self.showMinimized()
+        self.recorder.hide_overlay()
         self.region_start_timer.start(150)
+        self.showMinimized()
 
     def start_region_capture(self):
+        area = self.recorder.settings.capture_region
+        if not region_is_available(area):
+            self.recording_status.set_message("Выбранная область недоступна. Выберите её заново.")
+            self.restore_region_window()
+            self.update_region_controls()
+            self.update_recording_controls()
+            return
         self.recorder.start()
-        if not self.recorder.active:
+        if self.recorder.active:
+            self.region_outline = RegionOutline(area)
+            self.region_outline.resized_region.connect(self.resize_recording_region)
+            self.region_outline.show()
+        else:
             self.restore_region_window()
         self.update_recording_controls()
+
+    def resize_recording_region(self, area):
+        if region_is_available(area) and self.recorder.update_capture_region(area):
+            self.save_capture_selection(replace(self.recorder.settings, capture_region=area))
+        elif self.region_outline is not None:
+            original = self.recorder.pending_region or self.recorder.capture_region
+            if original is not None:
+                self.region_outline.set_region(original)
+
+    def update_ready_overlay(self):
+        if self.recorder is None or self.recorder.active:
+            return
+        settings = self.recorder.settings
+        ready = settings.recording_mode == "game" or region_is_available(settings.capture_region)
+        if (
+            ready and self.isVisible() and not self.close_after_recording
+            and self.region_selector is None and not self.region_start_timer.isActive()
+            and self.recording_settings_dialog is None and self.recording_hotkey
+        ):
+            self.recorder.show_ready()
+        else:
+            self.recorder.hide_overlay()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.update_ready_overlay()
 
     def restore_region_window(self):
         if self.region_restore_state is not None:
@@ -513,8 +557,13 @@ class VideoEditor(QMainWindow):
                 widget.style().polish(widget)
 
     def on_recording_finished(self):
+        if self.region_outline is not None:
+            self.region_outline.hide()
+            self.region_outline.deleteLater()
+            self.region_outline = None
         self.restore_region_window()
         self.update_recording_controls()
+        self.update_ready_overlay()
         if self.close_after_recording:
             QTimer.singleShot(0, self.close)
 
@@ -535,6 +584,8 @@ class VideoEditor(QMainWindow):
             self.recorder.stop()
             event.ignore()
             return
+        if self.recorder is not None:
+            self.recorder.hide_overlay()
         super().closeEvent(event)
     
     def load_video(self):

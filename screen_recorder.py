@@ -17,6 +17,7 @@ from logger import logger
 from recording_audio import AudioCapture, SOURCES, mux_audio_args
 from recording_segments import JoinSegments
 from recording_settings import RecordingSettings, default_recording_directory
+from screen_region import exclude_from_capture
 from webcam_capture import (
     DEFAULT_WEBCAM_BORDER_COLOR, DEFAULT_WEBCAM_BORDER_STYLE, DEFAULT_WEBCAM_POSITION, webcam_overlay,
 )
@@ -29,7 +30,6 @@ VK_F9 = 0x78
 RIDEV_INPUTSINK = 0x0100
 RID_INPUT = 0x10000003
 RI_KEY_BREAK = 0x0001
-WDA_EXCLUDEFROMCAPTURE = 0x11
 CAPTURE_CLOCK = re.compile(rb"showinfo@capture_clock[^\r\n]*?\bpts:\s*(\d+)")
 NO_RECORDED_FRAMES = "Запись отменена до получения первого кадра."
 
@@ -176,6 +176,8 @@ class ScreenRecorder(QObject):
         self.keep_work_dir = False
         self.paused = False
         self.pausing = False
+        self.capture_region = None
+        self.pending_region = None
         self.audio_job = None
         self.audio_names = {}
         self.audio_errors = {}
@@ -199,12 +201,11 @@ class ScreenRecorder(QObject):
             "QLabel { background: #25192e; color: #ffd6e2; padding: 8px 12px; "
             "border: 1px solid #79425d; font: bold 14px 'Segoe UI'; }"
         )
-        user32 = ctypes.WinDLL("user32", use_last_error=True)
-        exclude = user32.SetWindowDisplayAffinity
-        exclude.argtypes = [wintypes.HWND, wintypes.DWORD]
-        exclude.restype = wintypes.BOOL
-        if not exclude(int(self.overlay.winId()), WDA_EXCLUDEFROMCAPTURE):
+        if not exclude_from_capture(int(self.overlay.winId())):
             logger.warning("Windows не смогла исключить индикатор из захвата")
+        self.overlay_blink = QTimer(self)
+        self.overlay_blink.setInterval(600)
+        self.overlay_blink.timeout.connect(self._blink_overlay)
 
     @property
     def active(self):
@@ -238,6 +239,8 @@ class ScreenRecorder(QObject):
         self.keep_work_dir = False
         self.paused = False
         self.pausing = False
+        self.capture_region = region
+        self.pending_region = None
         self._start_segment()
 
     def _start_segment(self):
@@ -261,7 +264,7 @@ class ScreenRecorder(QObject):
         self.webcam_warning = ""
         if self.settings.webcam_enabled and not self.settings.webcam_device:
             self.webcam_warning = "Веб-камера не выбрана. Видео записано без вставки."
-        region = self.settings.capture_region if self.settings.recording_mode == "region" else None
+        region = self.capture_region
         if self.webcam_in_use and region is not None and min(region.width, region.height) < 32:
             self.webcam_in_use = False
             self.webcam_warning = "Выбранная область слишком мала для вставки веб-камеры."
@@ -294,8 +297,8 @@ class ScreenRecorder(QObject):
         self.video_started = True
         self.video_launch_time = time()
         options = {"audio": bool(self.audio_names)}
-        if self.settings.recording_mode == "region":
-            options["region"] = self.settings.capture_region
+        if self.capture_region is not None:
+            options["region"] = self.capture_region
         if self.webcam_in_use:
             options["camera"] = self.settings.webcam_device
             options["position"] = self.settings.webcam_position
@@ -328,7 +331,10 @@ class ScreenRecorder(QObject):
     def stop(self):
         if not self.active:
             return
-        if self.paused:
+        if self.pending_region is not None:
+            self.pending_region = None
+            self.status_changed.emit("Сохранение записи…")
+        elif self.paused:
             self._finish_segments()
         elif self.pausing:
             self.pausing = False
@@ -342,13 +348,32 @@ class ScreenRecorder(QObject):
         if self.paused:
             self.paused = False
             self._start_segment()
+        elif self.pending_region is not None:
+            self.capture_region = self.pending_region
+            self.pending_region = None
+            self.pausing = True
         elif not self.stopping:
             self.pausing = True
             self._stop_segment()
 
-    def _stop_segment(self):
+    def update_capture_region(self, region):
+        if not self.active or self.capture_region is None:
+            return False
+        if self.paused:
+            self.capture_region = region
+        elif self.pending_region is not None:
+            self.pending_region = region
+        elif self.stopping:
+            return False
+        elif region != self.capture_region:
+            self.pending_region = region
+            self._stop_segment("Изменение области записи…")
+        return True
+
+    def _stop_segment(self, message=None):
         self.stopping = True
-        message = "Постановка на паузу…" if self.pausing else "Сохранение записи…"
+        if message is None:
+            message = "Постановка на паузу…" if self.pausing else "Сохранение записи…"
         self.status_changed.emit(message)
         self._show_overlay(message)
         if not self.video_started and self.audio_job:
@@ -366,6 +391,29 @@ class ScreenRecorder(QObject):
         self.process.closeWriteChannel()
 
     def _show_overlay(self, text):
+        self.overlay_blink.stop()
+        self._set_overlay_text(text)
+
+    def show_ready(self):
+        if not self.active:
+            self._show_blinking_overlay("ГОТОВО  |  F12 — начать")
+
+    def hide_overlay(self):
+        self.overlay_blink.stop()
+        self.overlay.hide()
+
+    def _show_blinking_overlay(self, text):
+        self.blink_text = text
+        self.blink_visible = True
+        self._set_overlay_text(f"●  {text}")
+        self.overlay_blink.start()
+
+    def _blink_overlay(self):
+        self.blink_visible = not self.blink_visible
+        marker = "●" if self.blink_visible else "○"
+        self._set_overlay_text(f"{marker}  {self.blink_text}")
+
+    def _set_overlay_text(self, text):
         self.overlay.setText(text)
         self.overlay.adjustSize()
         origin = QApplication.primaryScreen().geometry().topLeft()
@@ -423,7 +471,7 @@ class ScreenRecorder(QObject):
                 return
             self._retry_without_webcam()
             return
-        self.overlay.hide()
+        self.hide_overlay()
         if exit_status == QProcess.NormalExit and exit_code == 0:
             self._complete_video(bool(self.frame_count), NO_RECORDED_FRAMES)
         else:
@@ -534,9 +582,11 @@ class ScreenRecorder(QObject):
             logger.warning(f"Проблемы захвата аудио: {self.audio_errors}")
         self.keep_work_dir = self.keep_work_dir or not cleanup
         self.session_warnings.extend(notices)
-        if self.pausing or self.segments:
+        if self.pausing or self.segments or self.pending_region is not None:
             self.segments.append((path, path == self.mixed_path))
-            if self.pausing:
+            if self.pending_region is not None:
+                self._restart_region_capture()
+            elif self.pausing:
                 self._enter_pause()
             else:
                 self._finish_segments()
@@ -545,7 +595,11 @@ class ScreenRecorder(QObject):
 
     def _segment_failed(self, message, cleanup=True):
         self.keep_work_dir = self.keep_work_dir or not cleanup
-        if self.pausing:
+        if self.pending_region is not None:
+            if message != NO_RECORDED_FRAMES:
+                self.session_warnings.append(message)
+            self._restart_region_capture()
+        elif self.pausing:
             if message != NO_RECORDED_FRAMES:
                 self.session_warnings.append(message)
             self._enter_pause()
@@ -556,12 +610,17 @@ class ScreenRecorder(QObject):
         else:
             self._finish_session(message, cleanup=not self.keep_work_dir)
 
+    def _restart_region_capture(self):
+        self.capture_region = self.pending_region
+        self.pending_region = None
+        self._start_segment()
+
     def _enter_pause(self):
         self.pausing = False
         self.paused = True
         self.stopping = False
         self.status_changed.emit("Запись на паузе. F9 — продолжить, F12 — завершить.")
-        self._show_overlay("Ⅱ ПАУЗА  |  F9 — продолжить")
+        self._show_blinking_overlay("ПАУЗА  |  F9 — продолжить")
 
     def _finish_segments(self):
         self.paused = False
@@ -606,7 +665,8 @@ class ScreenRecorder(QObject):
         self.segments = []
         self.paused = False
         self.pausing = False
-        self.overlay.hide()
+        self.pending_region = None
+        self.hide_overlay()
         if cleanup:
             try:
                 rmtree(directory)

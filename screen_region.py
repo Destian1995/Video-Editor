@@ -4,8 +4,8 @@ import ctypes
 from ctypes import wintypes
 from dataclasses import dataclass
 
-from PyQt5.QtCore import QObject, QRect, Qt, pyqtSignal
-from PyQt5.QtGui import QColor, QCursor, QPainter, QPen
+from PyQt5.QtCore import QObject, QPoint, QRect, Qt, pyqtSignal
+from PyQt5.QtGui import QColor, QCursor, QPainter, QPen, QRegion
 from PyQt5.QtWidgets import QApplication, QWidget
 
 
@@ -71,16 +71,54 @@ def _window_monitor_bounds(window_id):
     return _monitor_bounds(user32, from_window(window_id, 2))
 
 
-def region_is_available(region):
-    if region is None:
-        return False
+def _region_monitor_bounds(region):
     user32 = ctypes.WinDLL("user32")
     from_rect = user32.MonitorFromRect
     from_rect.argtypes = [ctypes.POINTER(wintypes.RECT), wintypes.DWORD]
     from_rect.restype = wintypes.HANDLE
     rect = wintypes.RECT(region.x, region.y, region.x + region.width, region.y + region.height)
-    bounds = _monitor_bounds(user32, from_rect(ctypes.byref(rect), 0))
-    return bounds.contains(QRect(region.x, region.y, region.width, region.height))
+    return _monitor_bounds(user32, from_rect(ctypes.byref(rect), 0))
+
+
+def region_is_available(region):
+    return region is not None and _region_monitor_bounds(region).contains(
+        QRect(region.x, region.y, region.width, region.height)
+    )
+
+
+def exclude_from_capture(window_id):
+    exclude = ctypes.WinDLL("user32").SetWindowDisplayAffinity
+    exclude.argtypes = [wintypes.HWND, wintypes.DWORD]
+    exclude.restype = wintypes.BOOL
+    return bool(exclude(window_id, 0x11))
+
+
+def _physical_cursor():
+    get_cursor = ctypes.WinDLL("user32").GetPhysicalCursorPos
+    get_cursor.argtypes = [ctypes.POINTER(wintypes.POINT)]
+    get_cursor.restype = wintypes.BOOL
+    point = wintypes.POINT()
+    if get_cursor(ctypes.byref(point)):
+        return QPoint(point.x, point.y)
+    return QCursor.pos()
+
+
+def resize_region(region, edges, delta, monitor):
+    left, top = region.x, region.y
+    right, bottom = left + region.width, top + region.height
+    if edges & Qt.LeftEdge:
+        left = min(right - 2, max(monitor.left(), left + delta.x()))
+        left += (right - left) % 2
+    elif edges & Qt.RightEdge:
+        right = max(left + 2, min(monitor.right() + 1, right + delta.x()))
+        right -= (right - left) % 2
+    if edges & Qt.TopEdge:
+        top = min(bottom - 2, max(monitor.top(), top + delta.y()))
+        top += (bottom - top) % 2
+    elif edges & Qt.BottomEdge:
+        bottom = max(top + 2, min(monitor.bottom() + 1, bottom + delta.y()))
+        bottom -= (bottom - top) % 2
+    return CaptureRegion(left, top, right - left, bottom - top)
 
 
 def pixels_from_selection(selection, canvas, monitor):
@@ -155,6 +193,90 @@ class RegionOverlay(QWidget):
             banner = QRect(0, 22, self.width(), 42)
             painter.setPen(QColor("#f4f0ff"))
             painter.drawText(banner, Qt.AlignCenter, "Выделите область мышью   ·   Esc — отмена")
+
+
+class RegionOutline(QWidget):
+    resized_region = pyqtSignal(object)
+    thickness = 6
+
+    def __init__(self, region):
+        flags = Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.WindowDoesNotAcceptFocus
+        super().__init__(None, flags)
+        self.setAttribute(Qt.WA_ShowWithoutActivating)
+        self.setMouseTracking(True)
+        self.area = region
+        self.drag = None
+        self.monitor = _region_monitor_bounds(region)
+        screen = next(
+            (screen for screen in QApplication.screens() if screen.geometry().topLeft() == self.monitor.topLeft()),
+            QApplication.primaryScreen(),
+        )
+        self.screen_bounds = screen.geometry()
+        self.winId()
+        self.windowHandle().setScreen(screen)
+        self.set_region(region)
+        exclude_from_capture(int(self.winId()))
+
+    def set_region(self, region):
+        self.area = region
+        physical, logical = self.monitor, self.screen_bounds
+        if physical.isEmpty():
+            return
+        sx, sy = logical.width() / physical.width(), logical.height() / physical.height()
+        x, y = region.x - physical.x(), region.y - physical.y()
+        left, top = round(x * sx), round(y * sy)
+        right, bottom = round((x + region.width) * sx), round((y + region.height) * sy)
+        inner = QRect(logical.x() + left, logical.y() + top, max(1, right - left), max(1, bottom - top))
+        border = self.thickness
+        outer = inner.adjusted(-border, -border, border, border).intersected(logical)
+        hole = inner.adjusted(
+            max(0, border - (inner.left() - outer.left())),
+            max(0, border - (inner.top() - outer.top())),
+            -max(0, border - (outer.right() - inner.right())),
+            -max(0, border - (outer.bottom() - inner.bottom())),
+        )
+        self.setGeometry(outer)
+        self.setMask(QRegion(self.rect()).subtracted(QRegion(hole.translated(-outer.topLeft()))))
+
+    def _edges(self, point):
+        x, y = point.x(), point.y()
+        left, top = x < self.width() / 2, y < self.height() / 2
+        dx = x if left else self.width() - 1 - x
+        dy = y if top else self.height() - 1 - y
+        horizontal = Qt.LeftEdge if left else Qt.RightEdge
+        vertical = Qt.TopEdge if top else Qt.BottomEdge
+        if dx < 14 and dy < 14:
+            cursor = Qt.SizeBDiagCursor if left == top else Qt.SizeFDiagCursor
+            return horizontal | vertical, cursor
+        return (horizontal, Qt.SizeHorCursor) if dx < dy else (vertical, Qt.SizeVerCursor)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            edges, cursor = self._edges(event.pos())
+            self.setCursor(cursor)
+            self.drag = self.area, edges, _physical_cursor()
+
+    def _update_drag(self):
+        original, edges, anchor = self.drag
+        self.set_region(resize_region(original, edges, _physical_cursor() - anchor, self.monitor))
+
+    def mouseMoveEvent(self, event):
+        if self.drag is not None:
+            self._update_drag()
+        else:
+            self.setCursor(self._edges(event.pos())[1])
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton and self.drag is not None:
+            original = self.drag[0]
+            self._update_drag()
+            self.drag = None
+            if self.area != original:
+                self.resized_region.emit(self.area)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor("#bb9dff"))
 
 
 class ScreenRegionSelector(QObject):
