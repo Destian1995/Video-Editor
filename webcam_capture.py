@@ -18,6 +18,13 @@ WEBCAM_POSITIONS = {
 DEFAULT_WEBCAM_POSITION = "bottom_right"
 DEFAULT_WEBCAM_BORDER_STYLE = "thin"
 DEFAULT_WEBCAM_BORDER_COLOR = "#bb9dff"
+DEFAULT_WEBCAM_SIZE = "small"
+WEBCAM_SIZES = {
+    "small": ("Маленький", 4),
+    "medium": ("Средний", 5),
+    "large": ("Большой", 6),
+    "extra_large": ("Очень большой", 8),
+}
 WEBCAM_BORDER_STYLES = {
     "thin": ("Тонкая", ((4, None),)),
     "wide": ("Широкая", ((8, None),)),
@@ -32,6 +39,10 @@ def webcam_position(position):
 
 def webcam_border_style(style):
     return style if style in WEBCAM_BORDER_STYLES else DEFAULT_WEBCAM_BORDER_STYLE
+
+
+def webcam_size(size):
+    return size if size in WEBCAM_SIZES else DEFAULT_WEBCAM_SIZE
 
 
 def webcam_border_color(color):
@@ -57,6 +68,25 @@ def webcam_frame_filter(width, height, border_style, border_color):
     )
 
 
+def webcam_margin(region):
+    return 18 if region is None else min(18, min(region.width, region.height) // 8)
+
+
+def webcam_frame_size(size, region=None, border_style=DEFAULT_WEBCAM_BORDER_STYLE):
+    _, scale = WEBCAM_SIZES[webcam_size(size)]
+    width, height = 320, 180
+    if region is not None:
+        width = min(width, region.width // 6 * 2)
+        height = min(height, region.height // 6 * 2)
+    width, height = width * scale // 8 * 2, height * scale // 8 * 2
+    if region is not None:
+        _, layers = WEBCAM_BORDER_STYLES[webcam_border_style(border_style)]
+        inset = 2 * (webcam_margin(region) + sum(edge for edge, _ in layers))
+        width = min(width, (region.width - inset) // 2 * 2)
+        height = min(height, (region.height - inset) // 2 * 2)
+    return max(2, width), max(2, height)
+
+
 def webcam_devices():
     result = run_media(
         ["ffmpeg", "-hide_banner", "-list_devices", "true", "-f", "dshow", "-i", "dummy"],
@@ -77,14 +107,11 @@ def webcam_devices():
 
 def webcam_overlay(
     graph, position, border_style=DEFAULT_WEBCAM_BORDER_STYLE,
-    border_color=DEFAULT_WEBCAM_BORDER_COLOR, input_index=0, region=None,
+    border_color=DEFAULT_WEBCAM_BORDER_COLOR, input_index=0, region=None, size=DEFAULT_WEBCAM_SIZE,
 ):
     _, x, y = webcam_position(position)
-    width, height, margin = 320, 180, 18
-    if region is not None:
-        width = min(width, max(2, region.width // 6 * 2))
-        height = min(height, max(2, region.height // 6 * 2))
-        margin = min(margin, min(region.width, region.height) // 8)
+    width, height = webcam_frame_size(size, region, border_style)
+    margin = webcam_margin(region)
     x = x.format(margin=margin)
     y = y.format(margin=margin)
     frame = webcam_frame_filter(width, height, border_style, border_color)

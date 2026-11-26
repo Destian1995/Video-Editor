@@ -19,9 +19,9 @@ from recording_audio import (
 )
 from screen_region import CaptureRegion, RECORDING_MODES
 from webcam_capture import (
-    DEFAULT_WEBCAM_BORDER_COLOR, DEFAULT_WEBCAM_BORDER_STYLE, DEFAULT_WEBCAM_POSITION,
-    WEBCAM_BORDER_STYLES, WEBCAM_POSITIONS, webcam_border_color, webcam_border_layers,
-    webcam_border_style, webcam_devices, webcam_position,
+    DEFAULT_WEBCAM_BORDER_COLOR, DEFAULT_WEBCAM_BORDER_STYLE, DEFAULT_WEBCAM_POSITION, DEFAULT_WEBCAM_SIZE,
+    WEBCAM_BORDER_STYLES, WEBCAM_POSITIONS, WEBCAM_SIZES, webcam_border_color, webcam_border_layers,
+    webcam_border_style, webcam_devices, webcam_position, webcam_size,
 )
 from webcam_preview import WebcamPreviewDialog
 
@@ -53,6 +53,7 @@ class RecordingSettings:
     webcam_position: str = DEFAULT_WEBCAM_POSITION
     webcam_border_style: str = DEFAULT_WEBCAM_BORDER_STYLE
     webcam_border_color: str = DEFAULT_WEBCAM_BORDER_COLOR
+    webcam_size: str = DEFAULT_WEBCAM_SIZE
     recording_mode: str = "game"
     capture_region: Optional[CaptureRegion] = None
 
@@ -93,6 +94,7 @@ class RecordingPreferences:
             webcam_border_color=webcam_border_color(
                 store.value("recording/webcam_border_color", DEFAULT_WEBCAM_BORDER_COLOR, type=str)
             ),
+            webcam_size=webcam_size(store.value("recording/webcam_size", DEFAULT_WEBCAM_SIZE, type=str)),
             recording_mode=mode if mode in RECORDING_MODES else "game",
             capture_region=CaptureRegion.parse(store.value("recording/region", "", type=str)),
         )
@@ -111,6 +113,7 @@ class RecordingPreferences:
         store.setValue("recording/webcam_position", settings.webcam_position)
         store.setValue("recording/webcam_border_style", settings.webcam_border_style)
         store.setValue("recording/webcam_border_color", settings.webcam_border_color)
+        store.setValue("recording/webcam_size", settings.webcam_size)
         store.setValue("recording/mode", settings.recording_mode)
         store.setValue("recording/region", settings.capture_region.serialize() if settings.capture_region else "")
         store.sync()
@@ -319,8 +322,21 @@ class RecordingSettingsDialog(QDialog):
         layout.addWidget(self.webcam_position_label)
 
         border_controls = QWidget()
-        border_row = QHBoxLayout(border_controls)
-        border_row.setContentsMargins(0, 0, 0, 0)
+        appearance = QVBoxLayout(border_controls)
+        appearance.setContentsMargins(0, 0, 0, 0)
+        size_row = QHBoxLayout()
+        size_label = QLabel("Размер веб-камеры")
+        self.webcam_size = QComboBox()
+        self.webcam_size.setAccessibleName(size_label.text())
+        size_label.setBuddy(self.webcam_size)
+        for size, (name, _) in WEBCAM_SIZES.items():
+            self.webcam_size.addItem(name, size)
+        self.webcam_size.setCurrentIndex(self.webcam_size.findData(webcam_size(settings.webcam_size)))
+        size_row.addWidget(size_label)
+        size_row.addWidget(self.webcam_size, 1)
+        appearance.addLayout(size_row)
+
+        border_row = QHBoxLayout()
         border_label = QLabel("Стиль рамки")
         self.border_style = QComboBox()
         self.border_style.setAccessibleName(border_label.text())
@@ -337,6 +353,7 @@ class RecordingSettingsDialog(QDialog):
         border_row.addWidget(border_label)
         border_row.addWidget(self.border_style, 1)
         border_row.addWidget(self.border_color_button)
+        appearance.addLayout(border_row)
         layout.addWidget(border_controls)
         self.update_webcam_border()
         test_camera = QPushButton("Проверить веб-камеру")
@@ -358,7 +375,10 @@ class RecordingSettingsDialog(QDialog):
             self.webcam_status.setText("Выберите веб-камеру для проверки.")
             self.webcam_status.show()
             return
-        preview = WebcamPreviewDialog(device, self.border_style.currentData(), self.border_color, self)
+        preview = WebcamPreviewDialog(
+            device, self.border_style.currentData(), self.border_color, self,
+            size=self.webcam_size.currentData(),
+        )
         preview.exec_()
         preview.deleteLater()
 
@@ -508,6 +528,7 @@ class RecordingSettingsDialog(QDialog):
                 webcam_enabled=self.webcam_enabled.isChecked(),
                 webcam_device=webcam_device, webcam_name=webcam_name, webcam_position=position,
                 webcam_border_style=self.border_style.currentData(), webcam_border_color=self.border_color,
+                webcam_size=self.webcam_size.currentData(),
                 **options,
             )
             self.preferences.save(settings)

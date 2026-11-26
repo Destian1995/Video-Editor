@@ -4,31 +4,35 @@ from PyQt5.QtCore import QProcess, QTimer, Qt
 from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtWidgets import QDialog, QLabel, QPushButton, QVBoxLayout
 
-from webcam_capture import webcam_frame_filter
+from webcam_capture import DEFAULT_WEBCAM_SIZE, webcam_frame_filter, webcam_frame_size
 
 
-WIDTH, HEIGHT = 336, 196
-FRAME_SIZE = WIDTH * HEIGHT * 3
+FRAME_PADDING = 16
 
 
-def preview_args(device, border_style, border_color):
-    frame = webcam_frame_filter(320, 180, border_style, border_color)
+def preview_args(device, border_style, border_color, size=DEFAULT_WEBCAM_SIZE):
+    width, height = webcam_frame_size(size)
+    frame = webcam_frame_filter(width, height, border_style, border_color)
     return [
         "-hide_banner", "-nostdin", "-loglevel", "error",
         "-f", "dshow", "-i", f"video={device}", "-an",
-        "-vf", f"{frame},pad={WIDTH}:{HEIGHT}:(ow-iw)/2:(oh-ih)/2:color=0x14121e",
+        "-vf", f"{frame},pad={width + FRAME_PADDING}:{height + FRAME_PADDING}:(ow-iw)/2:(oh-ih)/2:color=0x14121e",
         "-c:v", "rawvideo", "-pix_fmt", "rgb24", "-f", "rawvideo", "pipe:1",
     ]
 
 
 class WebcamPreviewDialog(QDialog):
-    def __init__(self, device, border_style, border_color, parent):
+    def __init__(self, device, border_style, border_color, parent, size=DEFAULT_WEBCAM_SIZE):
         super().__init__(parent)
+        width, height = webcam_frame_size(size)
+        self.preview_width = width + FRAME_PADDING
+        self.preview_height = height + FRAME_PADDING
+        self.frame_bytes = self.preview_width * self.preview_height * 3
         self.setWindowTitle("Проверка веб-камеры")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 18, 20, 18)
         self.preview = QLabel()
-        self.preview.setFixedSize(WIDTH, HEIGHT)
+        self.preview.setFixedSize(self.preview_width, self.preview_height)
         self.preview.setStyleSheet("background: #14121e;")
         self.preview.setAccessibleName("Предпросмотр выбранной веб-камеры")
         layout.addWidget(self.preview)
@@ -49,16 +53,18 @@ class WebcamPreviewDialog(QDialog):
         self.timeout = QTimer(self)
         self.timeout.setSingleShot(True)
         self.timeout.timeout.connect(self._timed_out)
-        self.process.start("ffmpeg", preview_args(device, border_style, border_color))
+        self.process.start("ffmpeg", preview_args(device, border_style, border_color, size))
         self.timeout.start(8000)
 
     def _read_frames(self):
         self.buffer.extend(bytes(self.process.readAllStandardOutput()))
-        complete = len(self.buffer) // FRAME_SIZE * FRAME_SIZE
+        complete = len(self.buffer) // self.frame_bytes * self.frame_bytes
         if complete:
-            data = bytes(self.buffer[complete - FRAME_SIZE:complete])
+            data = bytes(self.buffer[complete - self.frame_bytes:complete])
             del self.buffer[:complete]
-            image = QImage(data, WIDTH, HEIGHT, WIDTH * 3, QImage.Format_RGB888)
+            image = QImage(
+                data, self.preview_width, self.preview_height, self.preview_width * 3, QImage.Format_RGB888,
+            )
             self.preview.setPixmap(QPixmap.fromImage(image))
             self.status.setText("Веб-камера работает.")
             self.timeout.stop()

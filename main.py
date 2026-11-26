@@ -24,7 +24,7 @@ from recording_audio import SOURCES
 from recording_settings import RecordingPreferences, RecordingSettingsDialog, format_gain
 from screen_recorder import TARGET_FPS, VK_F9, VK_F12, RecordingHotkey, ScreenRecorder
 from screen_region import RECORDING_MODES, RegionOutline, ScreenRegionSelector, default_capture_region, region_is_available
-from webcam_capture import WEBCAM_BORDER_STYLES, webcam_border_style, webcam_position
+from webcam_capture import WEBCAM_BORDER_STYLES, WEBCAM_SIZES, webcam_border_style, webcam_position, webcam_size
 
 
 APP_ICON = Path(__file__).with_name("video-editor.ico")
@@ -315,7 +315,7 @@ class VideoEditor(QMainWindow):
         fields = [
             ("format", "Формат"), ("fps", "Частота"), ("directory", "Папка"),
             *SOURCES.items(), ("webcam", "Веб-камера"), ("webcam_position", "Положение"),
-            ("webcam_border", "Рамка"),
+            ("webcam_size", "Размер камеры"), ("webcam_border", "Рамка"),
         ]
         for row, (field, caption) in enumerate(fields):
             details.addWidget(label(caption, "muted"), row, 0)
@@ -371,14 +371,17 @@ class VideoEditor(QMainWindow):
         if not settings.webcam_enabled:
             summary["webcam"].set_full_text("Выключена")
             summary["webcam_position"].set_full_text("—")
+            summary["webcam_size"].set_full_text("—")
             summary["webcam_border"].set_full_text("—")
         elif self.recorder.webcam_warning:
             summary["webcam"].set_full_text("Недоступна", self.recorder.webcam_warning)
             summary["webcam_position"].set_full_text("—")
+            summary["webcam_size"].set_full_text("—")
             summary["webcam_border"].set_full_text("—")
         else:
             summary["webcam"].set_full_text(settings.webcam_name or "Камера")
             summary["webcam_position"].set_full_text(webcam_position(settings.webcam_position)[0])
+            summary["webcam_size"].set_full_text(WEBCAM_SIZES[webcam_size(settings.webcam_size)][0])
             name, layers = WEBCAM_BORDER_STYLES[webcam_border_style(settings.webcam_border_style)]
             if layers:
                 name = f"{name} · {settings.webcam_border_color.upper()}"

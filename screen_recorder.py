@@ -21,7 +21,8 @@ from recording_segments import JoinSegments
 from recording_settings import RecordingSettings, default_recording_directory
 from screen_region import exclude_from_capture
 from webcam_capture import (
-    DEFAULT_WEBCAM_BORDER_COLOR, DEFAULT_WEBCAM_BORDER_STYLE, DEFAULT_WEBCAM_POSITION, webcam_overlay,
+    DEFAULT_WEBCAM_BORDER_COLOR, DEFAULT_WEBCAM_BORDER_STYLE, DEFAULT_WEBCAM_POSITION,
+    DEFAULT_WEBCAM_SIZE, webcam_overlay,
 )
 
 
@@ -106,7 +107,7 @@ class RecordingHotkey:
 def recording_args(
     path, audio=False, camera="", position=DEFAULT_WEBCAM_POSITION,
     border_style=DEFAULT_WEBCAM_BORDER_STYLE, border_color=DEFAULT_WEBCAM_BORDER_COLOR,
-    region=None,
+    region=None, camera_size=DEFAULT_WEBCAM_SIZE,
 ):
     source = "[0:v]setpts=PTS-STARTPTS" if region is not None else (
         f"ddagrab=output_idx=0:framerate={TARGET_FPS}:draw_mouse=0,hwdownload"
@@ -115,7 +116,7 @@ def recording_args(
     if camera:
         capture = webcam_overlay(
             capture, position, border_style, border_color,
-            input_index=int(region is not None), region=region,
+            input_index=int(region is not None), region=region, size=camera_size,
         )
     graph = f"{capture}[screen]"
     if audio:
@@ -336,6 +337,7 @@ class ScreenRecorder(QObject):
             options["position"] = self.settings.webcam_position
             options["border_style"] = self.settings.webcam_border_style
             options["border_color"] = self.settings.webcam_border_color
+            options["camera_size"] = self.settings.webcam_size
             self.webcam_timeout.start(12000)
         self.process.start("ffmpeg", recording_args(self.partial_path, **options))
 
