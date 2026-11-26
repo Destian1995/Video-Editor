@@ -1,8 +1,9 @@
 """Параметры записи и диалог их редактирования."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from subprocess import TimeoutExpired
+from typing import Optional
 
 from PyQt5.QtCore import QSettings, QStandardPaths, Qt
 from PyQt5.QtGui import QColor, QIcon, QPixmap
@@ -16,6 +17,7 @@ from editor_ui import WebcamBorderPreview
 from recording_audio import (
     MicrophoneTest, SOURCES, device_name, list_audio_devices, microphone_meter_level,
 )
+from screen_region import CaptureRegion, RECORDING_MODES
 from webcam_capture import (
     DEFAULT_WEBCAM_BORDER_COLOR, DEFAULT_WEBCAM_BORDER_STYLE, DEFAULT_WEBCAM_POSITION,
     WEBCAM_BORDER_STYLES, WEBCAM_POSITIONS, webcam_border_color, webcam_border_layers,
@@ -50,6 +52,8 @@ class RecordingSettings:
     webcam_position: str = DEFAULT_WEBCAM_POSITION
     webcam_border_style: str = DEFAULT_WEBCAM_BORDER_STYLE
     webcam_border_color: str = DEFAULT_WEBCAM_BORDER_COLOR
+    recording_mode: str = "game"
+    capture_region: Optional[CaptureRegion] = None
 
     def audio_selections(self):
         return {
@@ -70,6 +74,7 @@ class RecordingPreferences:
             gain = int(store.value("recording/microphone_gain_db", 0))
         except (TypeError, ValueError):
             gain = 0
+        mode = store.value("recording/mode", "game", type=str)
         return RecordingSettings(
             Path(store.value("recording/directory", str(default_recording_directory()), type=str)),
             game_enabled=store.value("recording/game_enabled", True, type=bool),
@@ -87,6 +92,8 @@ class RecordingPreferences:
             webcam_border_color=webcam_border_color(
                 store.value("recording/webcam_border_color", DEFAULT_WEBCAM_BORDER_COLOR, type=str)
             ),
+            recording_mode=mode if mode in RECORDING_MODES else "game",
+            capture_region=CaptureRegion.parse(store.value("recording/region", "", type=str)),
         )
 
     def save(self, settings):
@@ -103,6 +110,8 @@ class RecordingPreferences:
         store.setValue("recording/webcam_position", settings.webcam_position)
         store.setValue("recording/webcam_border_style", settings.webcam_border_style)
         store.setValue("recording/webcam_border_color", settings.webcam_border_color)
+        store.setValue("recording/mode", settings.recording_mode)
+        store.setValue("recording/region", settings.capture_region.serialize() if settings.capture_region else "")
         store.sync()
         if store.status() != QSettings.NoError:
             raise OSError("Не удалось записать файл настроек.")
@@ -480,8 +489,8 @@ class RecordingSettingsDialog(QDialog):
                 raise ValueError("Выберите веб-камеру или отключите её запись.")
             webcam_name = self.selected_webcam_name()
             position = self.webcam_positions.checkedButton().property("position")
-            settings = RecordingSettings(
-                directory, microphone_gain_db=self.mic_gain.value(),
+            settings = replace(
+                self.result_settings, directory=directory, microphone_gain_db=self.mic_gain.value(),
                 webcam_enabled=self.webcam_enabled.isChecked(),
                 webcam_device=webcam_device, webcam_name=webcam_name, webcam_position=position,
                 webcam_border_style=self.border_style.currentData(), webcam_border_color=self.border_color,

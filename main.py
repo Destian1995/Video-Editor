@@ -1,3 +1,4 @@
+from dataclasses import replace
 import sys
 from pathlib import Path
 
@@ -8,7 +9,7 @@ check_dependencies()
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QPushButton, QSlider, QLabel, QFileDialog, QMessageBox,
-    QDialog, QFrame, QLineEdit, QProgressBar, QScrollArea, QSizePolicy
+    QComboBox, QDialog, QFrame, QLineEdit, QProgressBar, QScrollArea, QSizePolicy
 )
 from PyQt5.QtCore import Qt, QSignalBlocker, QTimer, pyqtSignal, QThread
 from PyQt5.QtGui import QIcon, QImage
@@ -22,6 +23,7 @@ from operation_history import history
 from recording_audio import SOURCES
 from recording_settings import RecordingPreferences, RecordingSettingsDialog, format_gain
 from screen_recorder import TARGET_FPS, VK_F9, VK_F12, RecordingHotkey, ScreenRecorder
+from screen_region import RECORDING_MODES, ScreenRegionSelector, region_is_available
 from webcam_capture import WEBCAM_BORDER_STYLES, webcam_border_style, webcam_position
 
 
@@ -64,6 +66,11 @@ class VideoEditor(QMainWindow):
         self.recording_hotkey = None
         self.recording_settings_dialog = None
         self.close_after_recording = False
+        self.region_selector = None
+        self.region_restore_state = None
+        self.region_start_timer = QTimer(self)
+        self.region_start_timer.setSingleShot(True)
+        self.region_start_timer.timeout.connect(self.start_region_capture)
         
         self.initUI()
         self.setWindowTitle("Video Editor")
@@ -228,6 +235,32 @@ class VideoEditor(QMainWindow):
         self.capture_state = label("Ожидание", "captureState")
         capture_header.addWidget(self.capture_state)
         capture_layout.addLayout(capture_header)
+
+        mode_row = QHBoxLayout()
+        mode_label = label("Режим записи", "muted")
+        self.recording_mode = QComboBox()
+        self.recording_mode.setAccessibleName(mode_label.text())
+        mode_label.setBuddy(self.recording_mode)
+        for mode, name in RECORDING_MODES.items():
+            self.recording_mode.addItem(name, mode)
+        self.recording_mode.setCurrentIndex(self.recording_mode.findData(self.recorder.settings.recording_mode))
+        self.recording_mode.currentIndexChanged.connect(self.change_recording_mode)
+        mode_row.addWidget(mode_label)
+        mode_row.addWidget(self.recording_mode)
+        mode_row.addStretch()
+        capture_layout.addLayout(mode_row)
+
+        self.region_controls = QWidget()
+        region_row = QHBoxLayout(self.region_controls)
+        region_row.setContentsMargins(0, 0, 0, 0)
+        self.region_details = label("", "muted")
+        self.region_details.setWordWrap(True)
+        self.region_button = QPushButton("Выбрать область…")
+        self.region_button.clicked.connect(self.select_recording_region)
+        region_row.addWidget(self.region_details, 1)
+        region_row.addWidget(self.region_button)
+        capture_layout.addWidget(self.region_controls)
+
         self.capture_illustration = CaptureIllustration()
         capture_layout.addWidget(self.capture_illustration, 1)
         overlay_hint = label("Индикатор REC и FPS появится в левом верхнем углу экрана.", "muted")
@@ -292,10 +325,14 @@ class VideoEditor(QMainWindow):
         scroll.setWidget(sidebar_widget)
         page.addWidget(scroll)
         self.update_recording_summary()
+        self.update_region_controls()
         return tab
 
     def open_recording_settings(self):
-        if self.recorder.active or self.recording_settings_dialog is not None:
+        if (
+            self.recorder.active or self.region_selector is not None
+            or self.region_start_timer.isActive() or self.recording_settings_dialog is not None
+        ):
             return
         dialog = RecordingSettingsDialog(self.recording_preferences, self.recorder.settings, self)
         self.recording_settings_dialog = dialog
@@ -349,12 +386,88 @@ class VideoEditor(QMainWindow):
             summary[source].set_full_text(text, tooltip)
 
     def toggle_recording(self):
-        if not self.close_after_recording and self.recording_settings_dialog is None:
+        if self.close_after_recording or self.recording_settings_dialog is not None or self.region_selector is not None:
+            return
+        if self.region_start_timer.isActive():
+            self.region_start_timer.stop()
+            self.restore_region_window()
+        elif not self.recorder.active and self.recorder.settings.recording_mode == "region":
+            if region_is_available(self.recorder.settings.capture_region):
+                self.prepare_region_capture(self.windowState())
+            else:
+                self.select_recording_region(start_after_selection=True)
+        else:
             self.recorder.toggle()
-            self.update_recording_controls()
+        self.update_recording_controls()
+
+    def change_recording_mode(self):
+        self.save_capture_selection(replace(self.recorder.settings, recording_mode=self.recording_mode.currentData()))
+
+    def save_capture_selection(self, settings):
+        self.recorder.settings = settings
+        try:
+            self.recording_preferences.save(settings)
+        except OSError as error:
+            self.recording_status.set_message(str(error))
+            logger.warning(str(error))
+        self.update_region_controls()
+
+    def update_region_controls(self):
+        settings = self.recorder.settings
+        ordinary = settings.recording_mode == "region"
+        self.region_controls.setVisible(ordinary)
+        if ordinary and region_is_available(settings.capture_region):
+            area = settings.capture_region
+            self.region_details.setText(f"Область: {area.width} × {area.height} пикс.")
+            self.region_details.setToolTip(f"Координаты: {area.x}, {area.y}")
+        else:
+            self.region_details.setText("Сохранённая область недоступна" if settings.capture_region else "Область не выбрана")
+            self.region_details.setToolTip("")
+
+    def select_recording_region(self, start_after_selection=False):
+        if self.recorder.active or self.region_selector is not None or self.region_start_timer.isActive():
+            return
+        self.region_selection_state = self.windowState()
+        self.start_after_region_selection = start_after_selection
+        self.region_selector = ScreenRegionSelector(self)
+        self.region_selector.selected.connect(self.finish_region_selection)
+        self.hide()
+        self.region_selector.open()
+
+    def finish_region_selection(self, region):
+        selector = self.region_selector
+        self.region_selector = None
+        selector.deleteLater()
+        if region is not None:
+            self.save_capture_selection(replace(self.recorder.settings, capture_region=region))
+        if region is not None and self.start_after_region_selection:
+            self.prepare_region_capture(self.region_selection_state)
+        else:
+            self.setWindowState(self.region_selection_state)
+            self.show()
+        self.update_recording_controls()
+
+    def prepare_region_capture(self, previous_state):
+        self.region_restore_state = None if previous_state & Qt.WindowMinimized else previous_state
+        self.showMinimized()
+        self.region_start_timer.start(150)
+
+    def start_region_capture(self):
+        self.recorder.start()
+        if not self.recorder.active:
+            self.restore_region_window()
+        self.update_recording_controls()
+
+    def restore_region_window(self):
+        if self.region_restore_state is not None:
+            state = self.region_restore_state
+            self.region_restore_state = None
+            if not self.close_after_recording:
+                self.setWindowState(state)
+                self.show()
 
     def toggle_recording_pause(self):
-        if not self.close_after_recording and self.recording_settings_dialog is None:
+        if not self.close_after_recording and self.recording_settings_dialog is None and self.region_selector is None:
             self.recorder.toggle_pause()
             self.update_recording_controls()
 
@@ -389,7 +502,10 @@ class VideoEditor(QMainWindow):
         self.recording_button.setEnabled(not stopping)
         self.pause_button.setText("Продолжить" if paused else "Пауза")
         self.pause_button.setEnabled(active and not stopping)
-        self.recording_settings_button.setEnabled(not active)
+        idle = not active and self.region_selector is None and not self.region_start_timer.isActive()
+        self.recording_settings_button.setEnabled(idle)
+        self.recording_mode.setEnabled(idle)
+        self.region_button.setEnabled(idle)
         for widget in (self.capture_state, self.recording_button):
             if widget.property("recording") != recording:
                 widget.setProperty("recording", recording)
@@ -397,6 +513,7 @@ class VideoEditor(QMainWindow):
                 widget.style().polish(widget)
 
     def on_recording_finished(self):
+        self.restore_region_window()
         self.update_recording_controls()
         if self.close_after_recording:
             QTimer.singleShot(0, self.close)
@@ -411,6 +528,7 @@ class VideoEditor(QMainWindow):
         return super().nativeEvent(event_type, message)
 
     def closeEvent(self, event):
+        self.region_start_timer.stop()
         if self.recorder and self.recorder.active:
             self.close_after_recording = True
             self.recording_button.setEnabled(False)

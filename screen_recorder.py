@@ -104,13 +104,17 @@ class RecordingHotkey:
 def recording_args(
     path, audio=False, camera="", position=DEFAULT_WEBCAM_POSITION,
     border_style=DEFAULT_WEBCAM_BORDER_STYLE, border_color=DEFAULT_WEBCAM_BORDER_COLOR,
+    region=None,
 ):
-    capture = (
-        f"ddagrab=output_idx=0:framerate={TARGET_FPS}:draw_mouse=0,"
-        "hwdownload,format=bgra,pad=ceil(iw/2)*2:ceil(ih/2)*2"
+    source = "[0:v]setpts=PTS-STARTPTS" if region is not None else (
+        f"ddagrab=output_idx=0:framerate={TARGET_FPS}:draw_mouse=0,hwdownload"
     )
+    capture = f"{source},format=bgra,pad=ceil(iw/2)*2:ceil(ih/2)*2"
     if camera:
-        capture = webcam_overlay(capture, position, border_style, border_color)
+        capture = webcam_overlay(
+            capture, position, border_style, border_color,
+            input_index=int(region is not None), region=region,
+        )
     graph = f"{capture}[screen]"
     if audio:
         # Timestamp only the first frame. The clock branch must reach EOF so
@@ -123,6 +127,8 @@ def recording_args(
         "-hide_banner", "-loglevel", "info" if audio else "warning", "-nostats", "-n",
         "-stats_period", "1", "-progress", "pipe:1",
     ]
+    if region is not None:
+        args += region.ffmpeg_args(TARGET_FPS)
     if camera:
         args += [
             "-thread_queue_size", "32", "-rtbufsize", "64M", "-f", "dshow", "-analyzeduration", "0",
@@ -211,6 +217,10 @@ class ScreenRecorder(QObject):
             self.start()
 
     def start(self):
+        region = self.settings.capture_region if self.settings.recording_mode == "region" else None
+        if self.settings.recording_mode == "region" and region is None:
+            self._report_error("Сначала выберите область записи.")
+            return
         directory = self.settings.directory
         try:
             directory.mkdir(parents=True, exist_ok=True)
@@ -220,7 +230,8 @@ class ScreenRecorder(QObject):
             return
 
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        name = f"game_{timestamp}_{uuid4().hex}"
+        prefix = "screen" if region is not None else "game"
+        name = f"{prefix}_{timestamp}_{uuid4().hex}"
         self.output_path = directory / f"{name}.mp4"
         self.segments = []
         self.session_warnings = []
@@ -250,6 +261,10 @@ class ScreenRecorder(QObject):
         self.webcam_warning = ""
         if self.settings.webcam_enabled and not self.settings.webcam_device:
             self.webcam_warning = "Веб-камера не выбрана. Видео записано без вставки."
+        region = self.settings.capture_region if self.settings.recording_mode == "region" else None
+        if self.webcam_in_use and region is not None and min(region.width, region.height) < 32:
+            self.webcam_in_use = False
+            self.webcam_warning = "Выбранная область слишком мала для вставки веб-камеры."
         self.progress_buffer = b""
         self.error_buffer = b""
         self.frame_count = 0
@@ -279,6 +294,8 @@ class ScreenRecorder(QObject):
         self.video_started = True
         self.video_launch_time = time()
         options = {"audio": bool(self.audio_names)}
+        if self.settings.recording_mode == "region":
+            options["region"] = self.settings.capture_region
         if self.webcam_in_use:
             options["camera"] = self.settings.webcam_device
             options["position"] = self.settings.webcam_position
@@ -414,7 +431,10 @@ class ScreenRecorder(QObject):
             if details:
                 logger.error(f"FFmpeg завершил запись с ошибкой: {details}")
             self._complete_video(
-                False, "Захват завершился с ошибкой. Проверьте FFmpeg и попробуйте оконный режим без рамки."
+                False,
+                "Захват завершился с ошибкой. Проверьте, доступна ли выбранная область экрана."
+                if self.settings.recording_mode == "region" else
+                "Захват завершился с ошибкой. Проверьте FFmpeg и попробуйте оконный режим без рамки.",
             )
 
     def _retry_without_webcam(self):

@@ -6,14 +6,14 @@ from media_process import run_media
 
 
 WEBCAM_POSITIONS = {
-    "top_left": ("Сверху слева", "18", "18"),
-    "top_center": ("Сверху по центру", "(W-w)/2", "18"),
-    "top_right": ("Сверху справа", "W-w-18", "18"),
-    "middle_left": ("Слева по центру", "18", "(H-h)/2"),
-    "middle_right": ("Справа по центру", "W-w-18", "(H-h)/2"),
-    "bottom_left": ("Снизу слева", "18", "H-h-18"),
-    "bottom_center": ("Снизу по центру", "(W-w)/2", "H-h-18"),
-    "bottom_right": ("Снизу справа", "W-w-18", "H-h-18"),
+    "top_left": ("Сверху слева", "{margin}", "{margin}"),
+    "top_center": ("Сверху по центру", "(W-w)/2", "{margin}"),
+    "top_right": ("Сверху справа", "W-w-{margin}", "{margin}"),
+    "middle_left": ("Слева по центру", "{margin}", "(H-h)/2"),
+    "middle_right": ("Справа по центру", "W-w-{margin}", "(H-h)/2"),
+    "bottom_left": ("Снизу слева", "{margin}", "H-h-{margin}"),
+    "bottom_center": ("Снизу по центру", "(W-w)/2", "H-h-{margin}"),
+    "bottom_right": ("Снизу справа", "W-w-{margin}", "H-h-{margin}"),
 }
 DEFAULT_WEBCAM_POSITION = "bottom_right"
 DEFAULT_WEBCAM_BORDER_STYLE = "thin"
@@ -64,15 +64,25 @@ def webcam_devices():
     return devices
 
 
-def webcam_overlay(graph, position, border_style=DEFAULT_WEBCAM_BORDER_STYLE, border_color=DEFAULT_WEBCAM_BORDER_COLOR):
+def webcam_overlay(
+    graph, position, border_style=DEFAULT_WEBCAM_BORDER_STYLE,
+    border_color=DEFAULT_WEBCAM_BORDER_COLOR, input_index=0, region=None,
+):
     _, x, y = webcam_position(position)
+    width, height, margin = 320, 180, 18
+    if region is not None:
+        width = min(width, max(2, region.width // 6 * 2))
+        height = min(height, max(2, region.height // 6 * 2))
+        margin = min(margin, min(region.width, region.height) // 8)
+    x = x.format(margin=margin)
+    y = y.format(margin=margin)
     border = "".join(
         f",pad=iw+{2 * width}:ih+{2 * width}:{width}:{width}:color=0x{color[1:]}"
         for width, color in webcam_border_layers(border_style, border_color)
     )
     return (
         f"{graph}[desktop];"
-        "[0:v]setpts=PTS-STARTPTS,scale=320:180:force_original_aspect_ratio=decrease:"
+        f"[{input_index}:v]setpts=PTS-STARTPTS,scale={width}:{height}:force_original_aspect_ratio=decrease:"
         f"force_divisible_by=2,setsar=1{border}[camera];"
         f"[desktop]setpts=PTS-STARTPTS[desktop_start];"
         f"[desktop_start][camera]overlay=x={x}:y={y}:eof_action=pass:repeatlast=0"
