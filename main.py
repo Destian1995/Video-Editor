@@ -19,6 +19,7 @@ from editor_ui import (
 )
 from video_processor import VideoProcessor
 from logger import logger
+from montage_dialog import MontageDialog
 from operation_history import history
 from recording_audio import SOURCES
 from recording_settings import RecordingPreferences, RecordingSettingsDialog, format_gain
@@ -62,6 +63,7 @@ class VideoEditor(QMainWindow):
         self.processor = VideoProcessor()
         self.current_video_path = None
         self.trim_thread = None
+        self.montage_dialog = None
         self.recorder = None
         self.recording_hotkey = None
         self.recording_settings_dialog = None
@@ -123,6 +125,9 @@ class VideoEditor(QMainWindow):
         open_button = QPushButton("Открыть видео")
         open_button.clicked.connect(self.load_video)
         toolbar.addWidget(open_button)
+        montage_button = QPushButton("Монтаж…")
+        montage_button.clicked.connect(self.open_montage)
+        toolbar.addWidget(montage_button)
         preview_layout.addLayout(toolbar)
 
         self.frame_label = FramePreview()
@@ -628,6 +633,13 @@ class VideoEditor(QMainWindow):
         self.close_region_outline()
         super().closeEvent(event)
     
+    def open_montage(self):
+        if self.montage_dialog is None:
+            self.montage_dialog = MontageDialog(self)
+            if self.current_video_path:
+                self.montage_dialog.add_sources([self.current_video_path])
+        self.montage_dialog.exec_()
+
     def load_video(self):
         """Загружает видео файл"""
         file_path, _ = QFileDialog.getOpenFileName(

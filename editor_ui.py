@@ -502,13 +502,20 @@ QComboBox {
 }
 QComboBox:focus { border-color: #d3b7ff; }
 QComboBox:disabled { color: #aba3bf; background: #211b2c; }
-QComboBox QAbstractItemView {
+QComboBox QAbstractItemView, QListWidget {
     background: #211b2c;
     color: #f4f0ff;
     selection-background-color: #5a417f;
     selection-color: #ffffff;
     outline: 0;
 }
+QListWidget {
+    border: 1px solid #433952;
+    border-radius: 8px;
+    alternate-background-color: #282237;
+    padding: 4px;
+}
+QListWidget::item { padding: 6px 8px; }
 QScrollArea#recordingScroll { border: 0; background: transparent; }
 QWidget#recordingSidebar { background: #12121b; }
 QScrollBar:vertical { width: 9px; background: #12121b; margin: 0; }

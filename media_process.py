@@ -30,3 +30,10 @@ def run_media(command, **options):
         command, stdin=subprocess.DEVNULL,
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), **options,
     )
+
+
+def open_media(command, **options):
+    return subprocess.Popen(
+        command, stdin=subprocess.DEVNULL,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), **options,
+    )

@@ -2,6 +2,7 @@ import ffmpeg
 import cv2
 import json
 import os
+from fractions import Fraction
 
 from media_process import run_media
 
@@ -24,7 +25,8 @@ class VideoProcessor:
                 raise ValueError(result.stderr.decode("utf-8", errors="replace").strip())
             probe = json.loads(result.stdout)
             video_info = next(
-                (stream for stream in probe['streams'] if stream['codec_type'] == 'video'), 
+                (stream for stream in probe['streams']
+                 if stream['codec_type'] == 'video' and not stream.get('disposition', {}).get('attached_pic')),
                 None
             )
             
@@ -36,22 +38,32 @@ class VideoProcessor:
                 None
             )
             
+            fps = video_info.get('r_frame_rate', '30/1')
+            rotation = next(
+                (entry['rotation'] for entry in video_info.get('side_data_list', []) if 'rotation' in entry),
+                0,
+            )
             self.video_info = {
                 'duration': float(probe['format'].get('duration', 0)),
                 'width': video_info.get('width', 0),
                 'height': video_info.get('height', 0),
-                'fps': eval(video_info.get('r_frame_rate', '30/1')),
+                'fps': float(Fraction(fps)) if fps not in ('0/0', 'N/A') else 0.0,
                 'codec': video_info.get('codec_name', 'unknown'),
                 'bitrate': video_info.get('bit_rate', 'unknown'),
                 'has_audio': audio_info is not None,
+                'video_index': video_info['index'],
+                'audio_index': audio_info['index'] if audio_info else None,
+                'video_duration': video_info.get('duration'),
+                'rotation': rotation,
+                'sample_aspect_ratio': video_info.get('sample_aspect_ratio'),
                 'file_size': os.path.getsize(video_path) / (1024 * 1024),  # MB
             }
             
             self.current_video = video_path
             return self.video_info
             
-        except Exception as e:
-            raise Exception(f"Ошибка при загрузке информации о видео: {str(e)}")
+        except (OSError, ValueError, TypeError, KeyError, ZeroDivisionError) as error:
+            raise ValueError(f"Ошибка при загрузке информации о видео: {error}") from error
     
     def get_frame(self, video_path: str, timestamp: float):
         """Получает кадр видео в указанный момент времени"""
