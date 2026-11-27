@@ -19,6 +19,7 @@ DEFAULT_WEBCAM_POSITION = "bottom_right"
 DEFAULT_WEBCAM_BORDER_STYLE = "thin"
 DEFAULT_WEBCAM_BORDER_COLOR = "#bb9dff"
 DEFAULT_WEBCAM_SIZE = "small"
+SEGMENTED_WIDTH, SEGMENTED_HEIGHT, SEGMENTED_FPS = 480, 270, 24
 WEBCAM_SIZES = {
     "small": ("Маленький", 4),
     "medium": ("Средний", 5),

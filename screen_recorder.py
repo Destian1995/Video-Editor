@@ -24,6 +24,7 @@ from webcam_capture import (
     DEFAULT_WEBCAM_BORDER_COLOR, DEFAULT_WEBCAM_BORDER_STYLE, DEFAULT_WEBCAM_POSITION,
     DEFAULT_WEBCAM_SIZE, webcam_overlay,
 )
+from webcam_stream import SegmentedWebcam, segmented_input_args
 
 
 TARGET_FPS = 60
@@ -108,6 +109,7 @@ def recording_args(
     path, audio=False, camera="", position=DEFAULT_WEBCAM_POSITION,
     border_style=DEFAULT_WEBCAM_BORDER_STYLE, border_color=DEFAULT_WEBCAM_BORDER_COLOR,
     region=None, camera_size=DEFAULT_WEBCAM_SIZE, hardware=False,
+    segmented_port=None,
 ):
     # Opening DirectShow after the screen source can starve screen capture
     # even when both sources keep up on their own.
@@ -130,7 +132,9 @@ def recording_args(
         "-hide_banner", "-loglevel", "info" if audio else "warning", "-nostats", "-n",
         "-stats_period", "1", "-progress", "pipe:1",
     ]
-    if camera:
+    if camera and segmented_port:
+        args += ["-thread_queue_size", "8", *segmented_input_args(segmented_port)]
+    elif camera:
         args += [
             "-thread_queue_size", "8", "-rtbufsize", "24M", "-f", "dshow",
             "-use_video_device_timestamps", "0", "-analyzeduration", "0",
@@ -243,6 +247,7 @@ class ScreenRecorder(QObject):
         self.audio_resolved = False
         self.webcam_in_use = False
         self.webcam_warning = ""
+        self.segmented_webcam = None
         self.stopping = False
         self.output_path = None
         self.partial_path = None
@@ -324,6 +329,9 @@ class ScreenRecorder(QObject):
         if self.webcam_in_use and region is not None and min(region.width, region.height) < 32:
             self.webcam_in_use = False
             self.webcam_warning = "Выбранная область слишком мала для вставки веб-камеры."
+        if self.webcam_in_use and self.settings.webcam_background and not Path(self.settings.webcam_background).is_file():
+            self.webcam_in_use = False
+            self.webcam_warning = "Картинка фона веб-камеры недоступна. Видео записано без вставки."
         self.progress_buffer = b""
         self.error_buffer = b""
         self.frame_count = 0
@@ -360,6 +368,20 @@ class ScreenRecorder(QObject):
                 ])
                 self.encoder_probe_timeout.start(3000)
             return
+        if self.webcam_in_use:
+            self.webcam_timeout.start(12000)
+            if self.settings.webcam_background:
+                if self.segmented_webcam is None:
+                    self.segmented_webcam = SegmentedWebcam(
+                        self.settings.webcam_device, self.settings.webcam_background, self,
+                    )
+                    self.segmented_webcam.ready.connect(self._launch_video)
+                    self.segmented_webcam.failed.connect(self._on_background_failed)
+                    self.segmented_webcam.start()
+                return
+        self._launch_video()
+
+    def _launch_video(self, segmented_port=None):
         self.video_started = True
         self.video_launch_time = time()
         options = {"audio": bool(self.audio_names)}
@@ -374,7 +396,7 @@ class ScreenRecorder(QObject):
             options["border_style"] = self.settings.webcam_border_style
             options["border_color"] = self.settings.webcam_border_color
             options["camera_size"] = self.settings.webcam_size
-            self.webcam_timeout.start(12000)
+            options["segmented_port"] = segmented_port
         self.process.start("ffmpeg", recording_args(self.partial_path, **options))
 
     def _encoder_probe_finished(self, code, status):
@@ -393,8 +415,25 @@ class ScreenRecorder(QObject):
             self._start_video()
 
     def _on_webcam_timeout(self):
-        if self.webcam_in_use and not self.frame_count and self.process.state() != QProcess.NotRunning:
+        if not self.webcam_in_use or self.frame_count:
+            return
+        if self.segmented_webcam is not None and not self.video_started:
+            self._retry_without_webcam()
+        elif self.process.state() != QProcess.NotRunning:
             self.process.kill()
+
+    def _on_background_failed(self, details):
+        logger.warning(f"Не удалось обработать фон веб-камеры: {details}")
+        if not self.video_started:
+            self._retry_without_webcam()
+        elif not self.stopping:
+            self.webcam_warning = "Обработка фона веб-камеры прервалась."
+            self.webcam_changed.emit()
+
+    def _stop_segmented_webcam(self):
+        if self.segmented_webcam is not None:
+            self.segmented_webcam.stop()
+            self.segmented_webcam = None
 
     def _on_audio_finished(self):
         job = self.audio_job
@@ -463,6 +502,8 @@ class ScreenRecorder(QObject):
         self._show_overlay(message)
         if not self.video_started:
             self.waiting_for_encoder = False
+            self.webcam_timeout.stop()
+            self._stop_segmented_webcam()
             if self.audio_job:
                 self.audio_job.stop()
             else:
@@ -547,10 +588,12 @@ class ScreenRecorder(QObject):
     def _on_process_error(self, error):
         if error == QProcess.FailedToStart:
             self.webcam_timeout.stop()
+            self._stop_segmented_webcam()
             self._complete_video(False, f"Не удалось запустить FFmpeg. {self.process.errorString()}")
 
     def _on_finished(self, exit_code, exit_status):
         self.webcam_timeout.stop()
+        self._stop_segmented_webcam()
         self._read_progress()
         self._read_errors()
         if not self.frame_count and not self.stopping and self.using_nvenc and b"h264_nvenc" in self.error_buffer:
@@ -579,9 +622,14 @@ class ScreenRecorder(QObject):
             )
 
     def _retry_without_webcam(self):
+        self.webcam_timeout.stop()
+        self._stop_segmented_webcam()
         logger.warning(f"Запуск с веб-камерой не удался: {self.error_buffer.decode('utf-8', errors='replace')}")
         self.webcam_in_use = False
-        self.webcam_warning = "Веб-камера недоступна. Видео записано без вставки."
+        self.webcam_warning = (
+            "Не удалось запустить веб-камеру с заменой фона. Видео записано без вставки."
+            if self.settings.webcam_background else "Веб-камера недоступна. Видео записано без вставки."
+        )
         self.webcam_changed.emit()
         self._retry_capture("Камера недоступна. Запуск записи экрана…")
 

@@ -56,6 +56,7 @@ class RecordingSettings:
     webcam_size: str = DEFAULT_WEBCAM_SIZE
     recording_mode: str = "game"
     capture_region: Optional[CaptureRegion] = None
+    webcam_background: str = ""
 
     def audio_selections(self):
         return {
@@ -97,6 +98,7 @@ class RecordingPreferences:
             webcam_size=webcam_size(store.value("recording/webcam_size", DEFAULT_WEBCAM_SIZE, type=str)),
             recording_mode=mode if mode in RECORDING_MODES else "game",
             capture_region=CaptureRegion.parse(store.value("recording/region", "", type=str)),
+            webcam_background=store.value("recording/webcam_background", "", type=str),
         )
 
     def save(self, settings):
@@ -114,6 +116,7 @@ class RecordingPreferences:
         store.setValue("recording/webcam_border_style", settings.webcam_border_style)
         store.setValue("recording/webcam_border_color", settings.webcam_border_color)
         store.setValue("recording/webcam_size", settings.webcam_size)
+        store.setValue("recording/webcam_background", settings.webcam_background)
         store.setValue("recording/mode", settings.recording_mode)
         store.setValue("recording/region", settings.capture_region.serialize() if settings.capture_region else "")
         store.sync()
@@ -354,6 +357,28 @@ class RecordingSettingsDialog(QDialog):
         border_row.addWidget(self.border_style, 1)
         border_row.addWidget(self.border_color_button)
         appearance.addLayout(border_row)
+
+        background_row = QHBoxLayout()
+        background_label = QLabel("Фон веб-камеры")
+        self.webcam_background = QLineEdit(settings.webcam_background)
+        self.webcam_background.setReadOnly(True)
+        self.webcam_background.setPlaceholderText("Исходный фон")
+        self.webcam_background.textChanged.connect(self.webcam_background.setToolTip)
+        self.webcam_background.setToolTip(settings.webcam_background)
+        background_label.setBuddy(self.webcam_background)
+        choose_background = QPushButton("Картинка…")
+        choose_background.clicked.connect(self.choose_webcam_background)
+        clear_background = QPushButton("Сбросить")
+        clear_background.clicked.connect(self.webcam_background.clear)
+        background_row.addWidget(background_label)
+        background_row.addWidget(self.webcam_background, 1)
+        background_row.addWidget(choose_background)
+        background_row.addWidget(clear_background)
+        appearance.addLayout(background_row)
+
+        clear_background.setEnabled(bool(settings.webcam_background))
+        self.webcam_background.textChanged.connect(lambda path: clear_background.setEnabled(bool(path)))
+
         layout.addWidget(border_controls)
         self.update_webcam_border()
         test_camera = QPushButton("Проверить веб-камеру")
@@ -375,12 +400,26 @@ class RecordingSettingsDialog(QDialog):
             self.webcam_status.setText("Выберите веб-камеру для проверки.")
             self.webcam_status.show()
             return
+        background = self.webcam_background.text()
+        if background and not Path(background).is_file():
+            self.webcam_status.setText("Картинка фона недоступна. Выберите другой файл или сбросьте фон.")
+            self.webcam_status.show()
+            return
+        self.webcam_status.hide()
         preview = WebcamPreviewDialog(
             device, self.border_style.currentData(), self.border_color, self,
-            size=self.webcam_size.currentData(),
+            size=self.webcam_size.currentData(), background=background,
         )
         preview.exec_()
         preview.deleteLater()
+
+    def choose_webcam_background(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Картинка для фона веб-камеры", self.webcam_background.text(),
+            "Изображения (*.png *.jpg *.jpeg)",
+        )
+        if path:
+            self.webcam_background.setText(path)
 
     def choose_webcam_border_color(self):
         color = QColorDialog.getColor(QColor(self.border_color), self, "Цвет рамки веб-камеры")
@@ -521,6 +560,9 @@ class RecordingSettingsDialog(QDialog):
             webcam_device = self.webcam_device.currentData() or ""
             if self.webcam_enabled.isChecked() and not webcam_device:
                 raise ValueError("Выберите веб-камеру или отключите её запись.")
+            background = self.webcam_background.text()
+            if self.webcam_enabled.isChecked() and background and not Path(background).is_file():
+                raise ValueError("Картинка фона недоступна. Выберите другой файл или сбросьте фон.")
             webcam_name = self.selected_webcam_name()
             position = self.webcam_positions.checkedButton().property("position")
             settings = replace(
@@ -529,6 +571,7 @@ class RecordingSettingsDialog(QDialog):
                 webcam_device=webcam_device, webcam_name=webcam_name, webcam_position=position,
                 webcam_border_style=self.border_style.currentData(), webcam_border_color=self.border_color,
                 webcam_size=self.webcam_size.currentData(),
+                webcam_background=background,
                 **options,
             )
             self.preferences.save(settings)
